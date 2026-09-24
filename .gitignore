@@ -1,0 +1,13 @@
+node_modules/
+dist/
+dist-electron/
+release/
+.agent-hub/
+.DS_Store
+.impeccable/
+.agents-hub/operations/
+archive/
+docs/AGENTIC-ROADMAP.md
+docs/PHASE-0-BASELINE.md
+docs/PHASE-1-DESIGN.md
+docs/REGRESSIONS.md

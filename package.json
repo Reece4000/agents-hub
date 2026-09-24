@@ -1,0 +1,69 @@
+{
+  "name": "agent-hub",
+  "version": "0.3.0",
+  "private": true,
+  "type": "module",
+  "description": "A repository canvas for coding tasks, codebase context, and agent sessions",
+  "main": "dist-electron/main.cjs",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "dev:web": "vite --host 127.0.0.1",
+    "build": "tsc --noEmit && vite build && node scripts/build-electron.mjs",
+    "start": "electron .",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "package": "npm run build && electron-builder --mac dir --config.electronDist=node_modules/electron/dist"
+  },
+  "dependencies": {
+    "@tiptap/extension-placeholder": "^3.0.0",
+    "@tiptap/react": "^3.0.0",
+    "@tiptap/starter-kit": "^3.0.0",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/addon-serialize": "^0.14.0",
+    "@xterm/headless": "^6.0.0",
+    "@xterm/xterm": "^6.0.0",
+    "lucide-react": "^0.468.0",
+    "node-pty": "^1.1.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-markdown": "^10.0.0",
+    "remark-gfm": "^4.0.0",
+    "uuid": "^11.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "electron": "^40.0.0",
+    "electron-builder": "^26.0.0",
+    "esbuild": "^0.25.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.9.0",
+    "vite": "^7.0.0"
+  },
+  "build": {
+    "appId": "dev.agenthub.desktop",
+    "productName": "Agent Hub",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**",
+      "dist-electron/**",
+      "package.json"
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": "dir",
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "Record speech to create notes on the Tasks canvas.",
+        "NSSpeechRecognitionUsageDescription": "Transcribe your spoken notes on this Mac."
+      }
+    },
+    "asarUnpack": [
+      "node_modules/node-pty/**",
+      "dist-electron/dictate"
+    ]
+  },
+  "author": "Agent Hub"
+}
