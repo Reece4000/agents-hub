@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from 'react'
-import { ArrowDownRight, BookOpen, Check, ChevronDown, ChevronRight, CircleHelp, Command, CornerDownRight, FileText, Focus, Folder, Grip, History, ImagePlus, Mic, Layers3, Link2, Maximize2, Minus, MoreHorizontal, Plus, Search, Trash2, X } from 'lucide-react'
+import { AlertTriangle, ArrowDownRight, BookOpen, Check, ChevronDown, ChevronRight, CircleHelp, Command, CornerDownRight, FileText, Focus, Folder, Grip, History, ImagePlus, Mic, Layers3, Link2, Maximize2, Minus, MoreHorizontal, Plus, Search, Trash2, X } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { bridge } from './bridge'
@@ -40,6 +40,8 @@ const liveAgent = (note: BoardNote, sessions: RepoContext[]) => {
 const AGENT_DRAG = 'application/x-agent-hub-terminal'
 const initials = (name: string) => { const words = name.trim().split(/\s+/).filter(Boolean); return (words.length > 1 ? words.map(word => word[0]).join('') : name.slice(0, 2)).slice(0, 2).toUpperCase() || '·' }
 const canTake = (note: BoardNote) => note.kind === 'task' && note.status !== 'done'
+/** Whether a context note's evidence changed after it was verified. */
+type Freshness = { stale: boolean; reasons: string[]; verifiedAt: string }
 const ago = (value: string) => {
   const seconds = Math.max(0, (Date.now() - new Date(value).getTime()) / 1000)
   return seconds < 60 ? 'now' : seconds < 3600 ? `${Math.floor(seconds / 60)}m` : seconds < 86400 ? `${Math.floor(seconds / 3600)}h` : date(value)
@@ -52,6 +54,7 @@ type Drag = { type: 'pan' | 'note' | 'section' | 'resize'; id?: string; startX: 
 export default function BoardCanvas({ repo, sessions, isVisible = true, focusRequest, createRequest, onDispatch, onOpenTerminal, onNewAgent, onError }: { repo: string; sessions: RepoContext[]; isVisible?: boolean; focusRequest?: { id: string; nonce: number } | null; createRequest?: { kind: NoteKind; nonce: number } | null; onDispatch: (taskId: string, terminalId: string) => void; onOpenTerminal: (terminalId: string) => void; onNewAgent: () => void; onError: (message: string) => void }) {
   const agents = useMemo(() => sessions.flatMap(session => session.terminals.filter(terminal => terminal.terminalKind !== 'shell')), [sessions])
   const [draggingAgent, setDraggingAgent] = useState<string | null>(null)
+  const [freshness, setFreshness] = useState<Record<string, Freshness>>({})
   const [dropTarget, setDropTarget] = useState<string | null>(null)
   const [snapshot, setSnapshot] = useState<BoardSnapshot>(blank)
   const [positions, setPositions] = useState<Record<string, BoardPosition>>({})
@@ -191,6 +194,13 @@ export default function BoardCanvas({ repo, sessions, isVisible = true, focusReq
     flyTo(current => ({ ...current, x: (surfaceSize.width - editorWidth) / 2 - position.x * current.zoom, y: (surfaceSize.height - editorHeight) / 2 - position.y * current.zoom }))
     setFocusTitleId(null)
   }
+  // Re-check context evidence against git shortly after the board settles.
+  useEffect(() => {
+    if (!repo || loading) return
+    let live = true
+    const timer = setTimeout(() => { bridge.invoke<Record<string, Freshness>>('board:freshness', { repo }).then(value => { if (live) setFreshness(value ?? {}) }).catch(() => {}) }, 800)
+    return () => { live = false; clearTimeout(timer) }
+  }, [repo, loading, snapshot])
   // The command palette asks for a new note or task at the view's center.
   const handledCreate = useRef(0)
   useEffect(() => {
@@ -393,6 +403,7 @@ export default function BoardCanvas({ repo, sessions, isVisible = true, focusReq
           const age = Date.now() - new Date(note.updatedAt).getTime()
           const fresh = Date.now() - new Date(note.createdAt).getTime() < 4000 ? ' is-new' : age < 4000 && note.updatedBy !== 'person' ? ' agent-touched' : ''
           const lastLog = note.log?.at(-1)
+          const stale = freshness[note.id]?.stale ? freshness[note.id] : null
           return <article
             key={note.id}
             data-note-id={note.id}
@@ -412,7 +423,7 @@ export default function BoardCanvas({ repo, sessions, isVisible = true, focusReq
               if (suppressOpen.current === note.id) { suppressOpen.current = null; event.preventDefault(); event.stopPropagation(); return }
               if (linkFrom && linkFrom !== note.id) { event.preventDefault(); event.stopPropagation(); void connectNotes(linkFrom, note.id) }
             }}
-            className={`kb-card kind-${note.kind}${editing ? ' editing selected' : ''}${dimmed ? ' dimmed' : ''}${linkFrom && linkFrom !== note.id ? ' link-target' : ''}${note.question ? ' asking' : ''}${live ? ` live-${live.state}` : ''}${draggingAgent && canTake(note) ? ' drop-ready' : ''}${dropTarget === note.id ? ' drop-target' : ''}${fresh}`}
+            className={`kb-card kind-${note.kind}${editing ? ' editing selected' : ''}${dimmed ? ' dimmed' : ''}${linkFrom && linkFrom !== note.id ? ' link-target' : ''}${note.question ? ' asking' : ''}${live ? ` live-${live.state}` : ''}${draggingAgent && canTake(note) ? ' drop-ready' : ''}${dropTarget === note.id ? ' drop-target' : ''}${fresh}${stale ? ' is-stale' : ''}`}
             onDragOver={event => { if (!canTake(note) || !event.dataTransfer.types.includes(AGENT_DRAG)) return; event.preventDefault(); event.dataTransfer.dropEffect = 'link'; if (dropTarget !== note.id) setDropTarget(note.id) }}
             onDragLeave={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDropTarget(current => current === note.id ? null : current) }}
             onDrop={event => { const terminalId = event.dataTransfer.getData(AGENT_DRAG); setDropTarget(null); setDraggingAgent(null); if (terminalId && canTake(note)) { event.preventDefault(); onDispatch(note.id, terminalId) } }}
@@ -420,11 +431,12 @@ export default function BoardCanvas({ repo, sessions, isVisible = true, focusReq
             onWheel={event => { if (editing) event.stopPropagation() }}
             onContextMenu={event => { event.stopPropagation(); if (!editing) { event.preventDefault(); setMenu({ x: event.clientX, y: event.clientY, world: worldAt(event.clientX, event.clientY), target: note.id }) } }}
           >
-            {editing ? <Inspector key={note.id} repo={repo} note={note} notes={snapshot.notes} sections={sections} sessions={sessions} focusTitle={focusTitleId === note.id} onClose={() => closeNote(note.id)} onDragStart={event => { if (!(event.target as HTMLElement).closest('button,input,select,textarea')) startDrag(event, 'note', note.id) }} apply={apply} agents={agents} onDispatch={onDispatch} onNewAgent={onNewAgent} onFocus={focusNote} onError={onError} registerSwitch={fn => { beforeSwitch.current = fn }} /> : <>
+            {editing ? <Inspector key={note.id} repo={repo} note={note} notes={snapshot.notes} sections={sections} sessions={sessions} focusTitle={focusTitleId === note.id} onClose={() => closeNote(note.id)} onDragStart={event => { if (!(event.target as HTMLElement).closest('button,input,select,textarea')) startDrag(event, 'note', note.id) }} apply={apply} freshness={freshness[note.id]} agents={agents} onDispatch={onDispatch} onNewAgent={onNewAgent} onFocus={focusNote} onError={onError} registerSwitch={fn => { beforeSwitch.current = fn }} /> : <>
               <div className="kb-card-top" onPointerDown={event => { if (!(event.target as HTMLElement).closest('button,input,select,textarea')) startDrag(event, 'note', note.id) }}><span className="kb-card-kind">{kindIcon(note.kind)}{note.kind === 'context' ? 'CONTEXT' : note.kind.toUpperCase()}</span><div className="kb-card-controls"><button className="kb-card-link" aria-label={`Link ${note.title} to another note`} title="Drag to another note, or click then choose a note" disabled={snapshot.readOnly} onPointerDown={event => { event.preventDefault(); event.stopPropagation(); linkPointer.current = { from: note.id, x: event.clientX, y: event.clientY, moved: false }; setLinkFrom(note.id); setLinkCursor(worldAt(event.clientX, event.clientY)) }} onClick={event => event.stopPropagation()}><Link2 size={13} /></button></div></div>
               <button className="kb-card-open" onPointerDown={event => startDrag(event, 'note', note.id)} onClick={() => { setFocusTitleId(note.id); void openNote(note.id) }}><strong>{note.title}</strong>{note.body && <span>{note.body}</span>}</button>
               {note.question ? <div className="kb-card-question" title={note.question.text}><CircleHelp size={13} /><span>{note.question.text}</span></div>
                 : live ? <button className={`kb-card-live state-${live.state}`} title={`${live.name}: ${live.status} · show terminal`} onPointerDown={event => event.stopPropagation()} onClick={event => { event.stopPropagation(); onOpenTerminal(live.terminalId) }}><i /><span><strong>{live.name}</strong> {live.status}</span></button>
+                : stale ? <div className="kb-card-stale" title={stale.reasons.join('\n')}><AlertTriangle size={12} /><span>Re-verify · {stale.reasons[0]}</span></div>
                 : lastLog && note.status !== 'done' ? <div className="kb-card-log" title={lastLog.text}><CornerDownRight size={12} /><span>{lastLog.text}</span><time>{ago(lastLog.at)}</time></div> : null}
               <div className="kb-card-foot"><span>{note.status ? <><i className={`kb-status status-${note.status}`} />{statusLabel[note.status]}</> : note.kind === 'context' ? 'CODEBASE CONTEXT' : 'NOTE'}</span><span>{date(note.updatedAt)}</span></div>
             </>}
@@ -485,7 +497,7 @@ function fit(snapshot: BoardSnapshot, element: HTMLDivElement | null, setViewpor
   setViewport({ x: rect.width / 2 - (minX + maxX) / 2 * zoom, y: rect.height / 2 - (minY + maxY) / 2 * zoom, zoom })
 }
 
-function Inspector({ repo, note, notes, sections, sessions, focusTitle, onClose, onDragStart, apply, agents, onDispatch, onNewAgent, onFocus, onError, registerSwitch }: { repo: string; note: BoardNote; notes: BoardNote[]; sections: BoardSection[]; sessions: RepoContext[]; focusTitle: boolean; onClose: () => void; onDragStart: (event: ReactPointerEvent) => void; apply: (command: BoardCommand) => Promise<unknown>; agents: TerminalResource[]; onDispatch: (taskId: string, terminalId: string) => void; onNewAgent: () => void; onFocus: (note: BoardNote) => void; onError: (message: string) => void; registerSwitch: (fn: (() => Promise<boolean>) | null) => void }) {
+function Inspector({ repo, note, notes, sections, sessions, focusTitle, onClose, onDragStart, apply, freshness, agents, onDispatch, onNewAgent, onFocus, onError, registerSwitch }: { repo: string; note: BoardNote; notes: BoardNote[]; sections: BoardSection[]; sessions: RepoContext[]; focusTitle: boolean; onClose: () => void; onDragStart: (event: ReactPointerEvent) => void; apply: (command: BoardCommand) => Promise<unknown>; freshness?: Freshness; agents: TerminalResource[]; onDispatch: (taskId: string, terminalId: string) => void; onNewAgent: () => void; onFocus: (note: BoardNote) => void; onError: (message: string) => void; registerSwitch: (fn: (() => Promise<boolean>) | null) => void }) {
   const [draft, setDraft] = useState(note)
   const draftRef = useRef(note)
   const savedRef = useRef(note)
@@ -643,7 +655,7 @@ function Inspector({ repo, note, notes, sections, sessions, focusTitle, onClose,
   const openHistory = async () => { try { setHistory(await bridge.invoke<Array<{ revision: string; note: BoardNote }>>('board:query', { repo, query: { type: 'history', id: note.id } })) } catch (error) { onError((error as Error).message) } }
   return <div className="kb-inspector" aria-label={`${kindLabel[note.kind]} editor`} onPaste={event => { const files = Array.from(event.clipboardData.files); if (files.some(file => file.type.startsWith('image/'))) { event.preventDefault(); void addImages(files) } }} onDragOver={event => { if (Array.from(event.dataTransfer.items).some(item => item.kind === 'file')) event.preventDefault() }} onDrop={event => { const files = Array.from(event.dataTransfer.files); if (files.length) { event.preventDefault(); void addImages(files) } }}><div className="kb-inspector-top" onPointerDown={onDragStart}><span className="kb-eyebrow">{kindIcon(draft.kind)} {kindLabel[draft.kind].toUpperCase()} <span className="kb-inspector-id">/ {note.id}</span></span><button aria-label="Close note" title="Close note" onClick={() => void close()}><X size={17} /></button></div>
     {stale && <div className="kb-inspector-stale">This note changed outside the editor. Your draft is preserved. <button onClick={() => { replaceDraft(note); savedRef.current = note; setSavedRevision(note.revision); setSaveState('saved') }}>Reload latest</button><button onClick={() => void navigator.clipboard.writeText(draft.body).catch(() => onError('Could not copy the draft.'))}>Copy draft</button></div>}
-    <div className="kb-inspector-scroll">{note.question && <QuestionPanel repo={repo} note={note} onError={onError} />}<label className="kb-inspector-title"><span>Title</span><input ref={titleRef} value={draft.title} onChange={e => edit(d => ({ ...d, title: e.target.value }))} maxLength={160} /></label>
+    <div className="kb-inspector-scroll">{note.question && <QuestionPanel repo={repo} note={note} onError={onError} />}{note.kind === 'context' && freshness?.stale && <StalePanel note={note} freshness={freshness} apply={apply} onFocus={onFocus} onError={onError} />}<label className="kb-inspector-title"><span>Title</span><input ref={titleRef} value={draft.title} onChange={e => edit(d => ({ ...d, title: e.target.value }))} maxLength={160} /></label>
       <div className="kb-inspector-meta"><label>Type<select value={draft.kind} onChange={e => edit(d => ({ ...d, kind: e.target.value as NoteKind }))}><option value="task">Task</option><option value="context">Codebase context</option><option value="note">Note</option></select></label>{draft.kind === 'task' && <label>Status<select value={draft.status ?? 'open'} onChange={e => edit(d => ({ ...d, status: e.target.value as TaskState }))}>{(['open', 'working', 'blocked', ...(draft.status === 'done' ? ['done'] : [])] as TaskState[]).map(value => <option key={value} value={value}>{statusLabel[value]}</option>)}</select></label>}</div>
       <label className="kb-field">Section<select value={draft.sectionId} onChange={e => edit(d => ({ ...d, sectionId: e.target.value }))}><option value="">No section</option>{sections.map(section => <option key={section.id} value={section.id}>{section.title}</option>)}</select></label>
       <div className="kb-body-label"><label htmlFor="kb-body">{draft.kind === 'task' ? 'Brief' : draft.kind === 'context' ? 'What we know' : 'Thoughts'}</label><button onClick={() => setPreview(v => !v)}>{preview ? 'Edit' : 'Preview'}</button></div>{preview ? <div className="kb-markdown"><ReactMarkdown remarkPlugins={[remarkGfm]}>{draft.body || '*Nothing written yet.*'}</ReactMarkdown></div> : <textarea ref={bodyInput} id="kb-body" className="kb-body" value={draft.body} onChange={e => edit(d => ({ ...d, body: e.target.value }))} placeholder={draft.kind === 'task' ? 'What needs to change? What would success look like?' : draft.kind === 'context' ? 'A concise, evidence-backed fact about this repository…' : 'A question, hypothesis, observation, or idea…'} />}
@@ -691,5 +703,23 @@ function ProgressLog({ entries }: { entries: ProgressEntry[] }) {
     <div><span className="kb-eyebrow">PROGRESS</span><span>{entries.length}</span></div>
     <ol>{shown.map((entry, index) => <li key={`${entry.at}-${index}`}><time dateTime={entry.at}>{ago(entry.at)}</time><strong>{entry.actor}</strong><span>{entry.text}</span></li>)}</ol>
     {entries.length > 8 && <button onClick={() => setAll(value => !value)}>{all ? 'Show recent' : `Show all ${entries.length}`}</button>}
+  </section>
+}
+
+/** A context fact whose evidence changed after it was verified: say why,
+ *  and offer to mark it verified or turn re-checking into a task. */
+function StalePanel({ note, freshness, apply, onFocus, onError }: { note: BoardNote; freshness: Freshness; apply: (command: BoardCommand) => Promise<unknown>; onFocus: (note: BoardNote) => void; onError: (message: string) => void }) {
+  const [busy, setBusy] = useState(false)
+  const run = async (work: () => Promise<void>) => { setBusy(true); try { await work() } catch (error) { onError((error as Error).message) } finally { setBusy(false) } }
+  const verify = () => run(async () => { await apply({ type: 'updateNote', id: note.id, expectedRevision: note.revision, patch: { verifiedAt: new Date().toISOString(), updatedBy: 'person' } }) })
+  const recheck = () => run(async () => {
+    const task = await apply({ type: 'createNote', note: { kind: 'task', title: `Re-verify: ${note.title}`.slice(0, 160), links: [{ to: note.id, kind: 'relates_to' }], acceptance: ['The fact matches the current code', 'Its evidence paths are current'],
+      body: `Check that codebase context ${note.id} still holds, then update it with board_upsert_context (id ${note.id}) or rewrite it.\n\nWhy it may be stale:\n${freshness.reasons.map(reason => `- ${reason}`).join('\n')}` } }) as BoardNote | null
+    if (task) onFocus(task)
+  })
+  return <section className="kb-stale" aria-label="This fact may be out of date">
+    <div className="kb-stale-head"><AlertTriangle size={15} /><strong>May be out of date</strong><span>verified {date(freshness.verifiedAt)}</span></div>
+    <ul>{freshness.reasons.map(reason => <li key={reason}>{reason}</li>)}</ul>
+    <div className="kb-stale-actions"><button disabled={busy} onClick={() => void verify()}>Still true · mark verified</button><button disabled={busy} className="kb-work" onClick={() => void recheck()}>Create re-verify task</button></div>
   </section>
 }

@@ -9,6 +9,7 @@ import { agentEnvironment, availableAgents, customProfile, isBuiltinAgent, nativ
 import { launchPlan, providerFor, writeBoardShim } from './agent-integration'
 import { ActivityTracker } from './agent-activity'
 import { AgentEventServer } from './agent-events'
+import { contextFreshness } from './freshness'
 import { DictationService } from './dictation'
 import { BoardOrganizer } from './board-organizer'
 import { TicketStore } from './tickets'
@@ -378,6 +379,7 @@ export class HubService extends EventEmitter {
       case 'dictation:stop': return this.dictation.stop()
       case 'dictation:cancel': this.dictation.cancel(); return null
       case 'board:briefing': return this.taskBriefing(this.repo(args.repo), String(args.id))
+      case 'board:freshness': { const repo = this.repo(args.repo); return contextFreshness(repo, this.boardStore.load(repo).notes) }
       case 'board:answer': {
         const repo = this.repo(args.repo), id = String(args.id)
         const before = this.boardStore.query(repo, { type: 'read', id }) as BoardNote | null

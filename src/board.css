@@ -200,3 +200,16 @@ button.kb-card-live:hover{filter:brightness(1.12)}
 .kb-card.agent-touched{animation:card-touched 1.6s ease-out}
 @keyframes card-in{from{opacity:0;transform:scale(.86) translateY(8px)}to{opacity:1;transform:none}}
 @keyframes card-touched{0%{box-shadow:0 0 0 2px var(--accent),0 0 24px color-mix(in srgb,var(--accent) 45%,transparent)}100%{box-shadow:0 0 0 0 transparent}}
+
+/* Context facts whose evidence changed after they were verified. */
+.kb-card.is-stale{opacity:.78;border-style:dashed}
+.kb-card.is-stale:hover{opacity:1}
+.kb-card-stale{display:flex;align-items:center;gap:6px;margin:0 12px 6px;padding:5px 8px;border-radius:6px;font-size:10px;background:var(--warning-bg);color:var(--warning);min-width:0}
+.kb-card-stale span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.kb-card-stale svg{flex-shrink:0}
+.kb-stale{margin:0 0 14px;padding:12px;border:1px dashed var(--warning);border-radius:9px;background:var(--warning-bg);display:flex;flex-direction:column;gap:8px}
+.kb-stale-head{display:flex;align-items:center;gap:7px;color:var(--warning);font-size:12px}
+.kb-stale-head span{margin-left:auto;font-size:10px;color:var(--muted)}
+.kb-stale ul{margin:0;padding-left:18px;font-size:11px;color:var(--text);display:flex;flex-direction:column;gap:3px}
+.kb-stale-actions{display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap}
+.kb-stale-actions button:not(.kb-work){padding:6px 10px;border-radius:7px;border:1px solid var(--border);background:var(--surface);color:var(--text);font-size:11px}

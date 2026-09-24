@@ -2,6 +2,7 @@ import { readFileSync, realpathSync, statSync } from 'node:fs'
 import { basename, extname, isAbsolute, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { BoardStore } from './board-store'
+import { contextFreshness } from './freshness'
 import type { BoardCommand, BoardNote, Evidence, LinkKind, NoteKind, TaskState } from '../shared/board'
 
 type Args = Record<string, unknown>
@@ -44,14 +45,20 @@ export class BoardAgent {
     return active.id
   }
   private apply(command: BoardCommand) { return this.store.apply(this.repo, command) }
+  /** Flag context notes whose evidence changed after they were verified, so
+   *  agents know which facts to check before relying on them. */
+  private withFreshness(notes: BoardNote[]) {
+    const freshness = contextFreshness(this.repo, notes)
+    return notes.map(note => freshness[note.id]?.stale ? { ...note, stale: true, staleReasons: freshness[note.id].reasons } : note)
+  }
   call(name: string, args: Args = {}): unknown {
     switch (name) {
       case 'board_summary': {
         const active = this.activeTask()
         return { ...(this.store.query(this.repo, { type: 'summary' }) as object), activeTask: active ? { id: active.id, title: active.title, status: active.status, ...(active.question ? { question: active.question.text } : {}) } : null }
       }
-      case 'board_search': return this.store.query(this.repo, { type: 'search', text: string(args.text), kind: args.kind as NoteKind | undefined, status: args.status as TaskState | undefined, sectionId: string(args.sectionId), path: string(args.path), linkedTo: string(args.linkedTo), limit: limit(args.limit) })
-      case 'board_read': return this.store.query(this.repo, { type: 'read', id: required(args.id, 'id') })
+      case 'board_search': return this.withFreshness(this.store.query(this.repo, { type: 'search', text: string(args.text), kind: args.kind as NoteKind | undefined, status: args.status as TaskState | undefined, sectionId: string(args.sectionId), path: string(args.path), linkedTo: string(args.linkedTo), limit: limit(args.limit) }) as BoardNote[])
+      case 'board_read': { const note = this.store.query(this.repo, { type: 'read', id: required(args.id, 'id') }) as BoardNote | null; return note ? this.withFreshness([note])[0] : null }
       case 'board_related': return this.store.query(this.repo, { type: 'related', id: required(args.id, 'id') })
       case 'board_update_task': {
         const id = required(args.id, 'id')
@@ -103,9 +110,9 @@ export class BoardAgent {
         if (id) {
           const current = this.store.query(this.repo, { type: 'read', id }) as BoardNote | null
           if (!current || current.kind !== 'context') throw new Error('Context note not found.')
-          return this.apply({ type: 'updateNote', id, expectedRevision: required(args.expectedRevision, 'expectedRevision'), patch: { title, subject, body, evidence, updatedBy: this.actor(args) } })
+          return this.apply({ type: 'updateNote', id, expectedRevision: required(args.expectedRevision, 'expectedRevision'), patch: { title, subject, body, evidence, verifiedAt: new Date().toISOString(), updatedBy: this.actor(args) } })
         }
-        return this.apply({ type: 'createNote', note: { kind: 'context', title, subject, body, evidence, updatedBy: this.actor(args) } })
+        return this.apply({ type: 'createNote', note: { kind: 'context', title, subject, body, evidence, verifiedAt: new Date().toISOString(), updatedBy: this.actor(args) } })
       }
       case 'board_complete_task': {
         const command: Extract<BoardCommand, { type: 'completeTask' }> = {
@@ -126,7 +133,7 @@ const optionalTask = { type: 'string', description: 'Task id. Defaults to the Ta
 export const boardTools = [
   { name: 'board_summary', description: 'Get a bounded overview of all Tasks, Notes, Context and sections in this repository, plus the Task this terminal\'s Session is working on (activeTask), if any.', inputSchema: { type: 'object', properties: {} } },
   { name: 'board_search', description: 'Find any board note, including offscreen and completed notes. Filter by text, kind, status, sectionId, path, or linkedTo.', inputSchema: { type: 'object', properties: { text: { type: 'string' }, kind: { type: 'string', enum: ['task', 'context', 'note'] }, status: { type: 'string', enum: ['open', 'working', 'blocked', 'done'] }, sectionId: { type: 'string' }, path: { type: 'string' }, linkedTo: { type: 'string' }, limit: { type: 'number' } } } },
-  { name: 'board_read', description: 'Read the current content, revision, progress log, and open question of a note by ID.', inputSchema: { type: 'object', properties: { id }, required: ['id'] } },
+  { name: 'board_read', description: 'Read the current content, revision, progress log, and open question of a note by ID. Context notes whose evidence files changed after they were verified carry stale: true and staleReasons; check the code before relying on them, and re-verify with board_upsert_context.', inputSchema: { type: 'object', properties: { id }, required: ['id'] } },
   { name: 'board_related', description: 'Read notes linked to or from a note.', inputSchema: { type: 'object', properties: { id }, required: ['id'] } },
   { name: 'board_log_progress', description: 'Append one short line to a Task\'s progress timeline, shown live on the person\'s canvas. Use it at meaningful steps (found the cause, tests pass, blocked on X), not for every action.', inputSchema: { type: 'object', properties: { id: optionalTask, text: { type: 'string' } }, required: ['text'] } },
   { name: 'board_ask', description: 'Ask the person a question about a Task when you need a decision you cannot make yourself. The Task becomes blocked and the question appears on its card; the answer is typed into this terminal when the person replies, so end your turn after asking.', inputSchema: { type: 'object', properties: { id: optionalTask, question: { type: 'string' }, options: { type: 'array', items: { type: 'string' }, description: 'Up to 8 suggested answers.' } }, required: ['question'] } },
