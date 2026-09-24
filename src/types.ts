@@ -3,6 +3,15 @@ export type TerminalKind = 'codex' | 'claude' | 'cursor' | 'shell' | 'custom'
 export interface Attachment { id: string; name: string; mime: string; size: number; preview?: string; path?: string }
 export interface Draft { html: string; text: string; attachments: Attachment[] }
 export interface TerminalProfile { label: string; executable: string; args: string[] }
+/** What an agent terminal is doing right now. `waiting` means it needs the
+ *  person (a permission prompt or question); `idle` means its turn is over. */
+export type AgentState = 'starting' | 'working' | 'waiting' | 'idle' | 'exited'
+export interface AgentActivity {
+  state: AgentState; detail: string; since: string;
+  /** `hooks`: reported by the agent itself; `terminal`: inferred from its screen. */
+  source: 'hooks' | 'terminal';
+  providerSessionId?: string;
+}
 /** A terminal process slot within a named context. Custom profiles are
  *  launched as an executable plus argv; shell interpolation is never used. */
 export interface TerminalResource {
@@ -11,6 +20,10 @@ export interface TerminalResource {
   profile?: TerminalProfile;
   draft: Draft;
   terminalRunning?: boolean;
+  /** Live agent state; never persisted. */
+  activity?: AgentActivity;
+  /** The agent CLI's own conversation id, so reopening resumes it. */
+  conversationId?: string;
   createdAt: string; updatedAt: string;
 }
 /** A durable group of terminals for one workspace task or area of work. */
@@ -48,6 +61,7 @@ export interface Bridge {
   onTickets?: (listener: (snapshot: { repo: string; tickets: Ticket[]; error?: string }) => void) => () => void;
   onBoard?: (listener: (snapshot: BoardSnapshot) => void) => () => void;
   onTerminal?: (listener: (event: {id:string; data?:string; seq?:number; exitCode?:number}) => void) => () => void;
+  onFocusTerminal?: (listener: (id: string) => void) => () => void;
   terminalInput?: (id:string,data:string) => void;
   terminalResize?: (id:string,cols:number,rows:number) => void;
 }

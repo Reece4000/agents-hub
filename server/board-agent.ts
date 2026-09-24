@@ -9,18 +9,29 @@ const string = (value: unknown) => typeof value === 'string' ? value.trim() : ''
 const required = (value: unknown, label: string) => { const result = string(value); if (!result) throw new Error(`${label} is required.`); return result }
 const limit = (value: unknown) => Math.max(1, Math.min(100, Number(value) || 30))
 
-/** The CLI and MCP transport share the desktop board store and its revision rules. */
+/** The CLI and MCP transport share the desktop board store and its revision
+ *  rules. `sessionId` is the Agent Hub Session the calling terminal belongs
+ *  to; its working Task is resolved on every call, so a Task handed to an
+ *  already-running agent is visible immediately. */
 export class BoardAgent {
   readonly repo: string
   readonly store: BoardStore
-  constructor(repo: string, store = new BoardStore()) {
+  constructor(repo: string, store = new BoardStore({ passive: true }), readonly sessionId = '') {
     this.repo = realpathSync(resolve(repo))
     this.store = store
   }
   close() { this.store.close() }
+  activeTask(): BoardNote | null {
+    if (!this.sessionId) return null
+    const working = this.store.query(this.repo, { type: 'search', kind: 'task', status: 'working', limit: 100 }) as BoardNote[]
+    return working.filter(note => note.sessionId === this.sessionId).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0] ?? null
+  }
   call(name: string, args: Args = {}): unknown {
     switch (name) {
-      case 'board_summary': return this.store.query(this.repo, { type: 'summary' })
+      case 'board_summary': {
+        const active = this.activeTask()
+        return { ...(this.store.query(this.repo, { type: 'summary' }) as object), activeTask: active ? { id: active.id, title: active.title, status: active.status } : null }
+      }
       case 'board_search': return this.store.query(this.repo, { type: 'search', text: string(args.text), kind: args.kind as NoteKind | undefined, status: args.status as TaskState | undefined, sectionId: string(args.sectionId), path: string(args.path), linkedTo: string(args.linkedTo), limit: limit(args.limit) })
       case 'board_read': return this.store.query(this.repo, { type: 'read', id: required(args.id, 'id') })
       case 'board_related': return this.store.query(this.repo, { type: 'related', id: required(args.id, 'id') })
@@ -63,7 +74,7 @@ export class BoardAgent {
 }
 
 export const boardTools = [
-  { name: 'board_summary', description: 'Get a bounded overview of all Tasks, Notes, Context and sections in this repository.', inputSchema: { type: 'object', properties: {} } },
+  { name: 'board_summary', description: 'Get a bounded overview of all Tasks, Notes, Context and sections in this repository, plus the Task this terminal\'s Session is working on (activeTask), if any.', inputSchema: { type: 'object', properties: {} } },
   { name: 'board_search', description: 'Find any board note, including offscreen and completed notes. Filter by text, kind, status, sectionId, path, or linkedTo.', inputSchema: { type: 'object', properties: { text: { type: 'string' }, kind: { type: 'string', enum: ['task', 'context', 'note'] }, status: { type: 'string', enum: ['open', 'working', 'blocked', 'done'] }, sectionId: { type: 'string' }, path: { type: 'string' }, linkedTo: { type: 'string' }, limit: { type: 'integer' } } } },
   { name: 'board_read', description: 'Read the current content and revision of a note by ID.', inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] } },
   { name: 'board_related', description: 'Read notes linked to or from a note.', inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] } },

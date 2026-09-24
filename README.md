@@ -38,15 +38,29 @@ The app watches valid direct edits to note files. An invalid file stays on disk 
 
 A Session groups independently running terminals for one repository. Assign a Task to a Session, then choose **Work in Session**. The task changes to `working`, and the Session shows a briefing containing the task, acceptance checks, linked context, and board access instructions. Send it to a running agent terminal or copy it for another CLI. **Board brief** in the Sessions toolbar prepares a general handoff for any model. Shell terminals do not receive a prompt automatically; copy the brief into an agent started in the shell.
 
-Every desktop terminal receives `AGENT_HUB_REPO`, `AGENT_HUB_BOARD_RUNTIME`, and `AGENT_HUB_BOARD_CLI`. A terminal opened while its Session has a working Task also receives `AGENT_HUB_ACTIVE_TASK_ID`. The bundled board executable uses the app's Electron runtime as Node:
+### Live agent state
+
+Claude Code and Codex terminals (including custom profiles that run them) are launched with per-run integration flags; nothing in `~/.claude` or `~/.codex` is modified:
+
+| | Claude Code | Codex |
+| --- | --- | --- |
+| State | Hooks passed with `--settings` post each event to a loopback endpoint | `notify` reports finished turns; approvals arrive as OSC 9 escapes |
+| Board | `--mcp-config` registers the `agent-hub` MCP server | `-c mcp_servers.agent_hub.*` registers it |
+| Resume | `--session-id` on first launch, `--resume` afterwards | `codex resume <thread-id>` |
+
+Other agents are tracked from the screen: output means working, a quiet screen means idle, and a bell or OSC 9/777 notification means the agent needs you. Tabs show each agent's state and current action. An agent that needs you, or finishes while the window is unfocused, raises a notification; the Dock badge counts agents waiting on you. Reopening a stopped agent resumes its conversation; **New conversation** starts fresh. Codex prints a one-line notice that command-line overrides run it without its shared background server.
+
+### Board access from terminals
+
+Every desktop terminal receives `AGENT_HUB_REPO`, `AGENT_HUB_SESSION_ID`, `AGENT_HUB_TERMINAL_ID`, `AGENT_HUB_BOARD_RUNTIME`, and `AGENT_HUB_BOARD_CLI`, and has the `agent-hub-board` command on its PATH. The board summary's `activeTask` is resolved from the Session on every call, so a Task handed to an already-running agent is visible immediately.
 
 ```sh
-ELECTRON_RUN_AS_NODE=1 "$AGENT_HUB_BOARD_RUNTIME" "$AGENT_HUB_BOARD_CLI" summary
-ELECTRON_RUN_AS_NODE=1 "$AGENT_HUB_BOARD_RUNTIME" "$AGENT_HUB_BOARD_CLI" search '{"kind":"context","text":"database"}'
-ELECTRON_RUN_AS_NODE=1 "$AGENT_HUB_BOARD_RUNTIME" "$AGENT_HUB_BOARD_CLI" read '"AH-12345678"'
+agent-hub-board summary
+agent-hub-board search '{"kind":"context","text":"database"}'
+agent-hub-board read '"AH-12345678"'
 ```
 
-Commands are `summary`, `search`, `read`, `related`, `update-task`, `upsert-context`, and `complete-task`. Pass one JSON argument after the command. Mutations require an `expectedRevision` from a fresh read; `complete-task` also requires an outcome and either an evidence-backed context change or a no-learning reason. The same executable with `mcp` implements a stdio MCP server exposing the board tools. Configure it in an agent that supports MCP using that agent's own settings; Agent Hub does not alter external CLI configuration.
+Commands are `summary`, `search`, `read`, `related`, `update-task`, `upsert-context`, and `complete-task`. Pass one JSON argument after the command. Mutations require an `expectedRevision` from a fresh read; `complete-task` also requires an outcome and either an evidence-backed context change or a no-learning reason. `agent-hub-board mcp` is a stdio MCP server exposing the same tools; Claude Code and Codex terminals get it automatically. Board reads from agents never rewrite `AGENTS.md`, `CLAUDE.md`, or `GEMINI.md`; only the desktop app maintains those blocks.
 
 On board open, Agent Hub adds a marked block to root `AGENTS.md`, `CLAUDE.md`, and `GEMINI.md` so Codex, Claude Code, and Gemini CLI can discover the board when launched from the repository. Other CLIs need the **Board brief** prompt or equivalent project instructions. An arbitrary model cannot be made to interpret environment variables by Agent Hub alone. Agents without the board CLI can read `.agents-hub/README.md` and the note files directly. Their access to the board depends on their own file and tool permissions.
 

@@ -11,6 +11,12 @@ import type { TerminalResource, Attachment } from './types'
 
 type Cached = { terminal: Terminal; fit: FitAddon; ready: boolean; seq:number; queue: {data:string;seq:number}[]; stop:()=>void }
 const terminals = new Map<string,Cached>()
+/** Release a deleted terminal's xterm instance and its event subscription. */
+export function disposeTerminal(id: string) {
+  const cached = terminals.get(id)
+  if (!cached) return
+  cached.stop(); cached.terminal.dispose(); terminals.delete(id)
+}
 const openTimeout = <T,>(promise: Promise<T>): Promise<T> => new Promise((resolve, reject) => {
   const timer = setTimeout(() => reject(new Error('Terminal open timed out. Try starting the terminal again.')), 20000)
   promise.then(value => { clearTimeout(timer); resolve(value) }, error => { clearTimeout(timer); reject(error) })
@@ -82,13 +88,13 @@ export default function TerminalView({session,onError,patch,themeMode,themeBackg
     const observer=new ResizeObserver(()=>{requestAnimationFrame(resize)});observer.observe(container.current);if(wrap.current)observer.observe(wrap.current)
     return()=>{alive=false;observer.disconnect()}
   },[session.id,running])
-  const open=async()=>{setBusy(true);setError('');try{await openTimeout(bridge.invoke('terminalOpen',{id:session.id}))}catch(e){setError((e as Error).message);onError((e as Error).message)}finally{setBusy(false)}}
-  // Opening an existing context starts its terminal automatically. This runs
-  // once per mounted context id (not on running changes) so an explicit Close
-  // stays closed until the user reopens or switches away and back.
+  const open=async(fresh=false)=>{setBusy(true);setError('');try{await openTimeout(bridge.invoke('terminalOpen',{id:session.id,fresh}))}catch(e){setError((e as Error).message);onError((e as Error).message)}finally{setBusy(false)}}
+  // A terminal starts automatically the first time it is shown in this app
+  // run. Once it has run, a stop or exit stays put: switching away and back
+  // shows the closed screen instead of silently starting a fresh agent.
   useEffect(()=>{
     if(!bridge.desktop) return
-    if(session.terminalRunning) return
+    if(session.terminalRunning || terminals.has(session.id)) return
     let alive=true
     setBusy(true); setError('')
     openTimeout(bridge.invoke('terminalOpen',{id:session.id})).catch(e=>{ if(alive){setError((e as Error).message); onError((e as Error).message)} }).finally(()=>{ if(alive) setBusy(false) })
@@ -131,7 +137,7 @@ export default function TerminalView({session,onError,patch,themeMode,themeBackg
   return <div className={`terminal-wrap${focused?' terminal-focused':''}`} ref={wrap} onFocus={onFocus} onBlur={onBlur}>
   <div className="terminal-body" onPaste={onPaste} onDrop={onDrop}>
     {running || terminals.has(session.id) ? <div className="terminal-screen"><div ref={container} className="terminal-fit"/></div> : <div className="terminal-idle"><strong>{bridge.desktop?`${session.agent} terminal`:'Terminal preview'}</strong><p>{bridge.desktop?`Start ${session.agent} in ${session.repo}. Configure its command in the terminal profile when you add it.`:'Terminal processes run in the desktop app.'}</p><button className="small-button" disabled={busy||!bridge.desktop} onClick={()=>void open()}>{busy?'Starting…':'Open terminal'}</button></div>}
-    {!running && terminals.has(session.id) && <div className="terminal-footer"><span>Terminal closed</span><button className="small-button" disabled={busy} onClick={()=>void open()}>Reopen terminal</button></div>}
+    {!running && terminals.has(session.id) && <div className="terminal-footer"><span>Terminal closed</span>{session.conversationId ? <><button className="small-button" disabled={busy} onClick={()=>void open(true)}>New conversation</button><button className="small-button" disabled={busy} onClick={()=>void open()}>Resume conversation</button></> : <button className="small-button" disabled={busy} onClick={()=>void open()}>Reopen terminal</button>}</div>}
     {error && <div className="inline-error">{error}</div>}
   </div>
   {patch && <TerminalComposer key={`prompt-${session.id}`} session={session} patch={patch} onError={onError} />}

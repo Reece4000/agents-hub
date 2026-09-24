@@ -24,6 +24,7 @@ function normalizeResource(raw: any, contextId: string, repo: string): TerminalR
     id: typeof raw?.id === 'string' ? raw.id : `terminal-${contextId}`, contextId, repo,
     name: text(raw?.name, 60) || agent, agent, terminalKind: kind, ...(profile && kind !== 'shell' ? { profile } : {}),
     draft: raw?.draft && typeof raw.draft === 'object' && Array.isArray(raw.draft.attachments) ? raw.draft : emptyDraft(),
+    ...(typeof raw?.conversationId === 'string' && /^[\w-]{1,200}$/.test(raw.conversationId) && kind !== 'shell' ? { conversationId: raw.conversationId } : {}),
     terminalRunning: false, createdAt: String(raw?.createdAt ?? now), updatedAt: String(raw?.updatedAt ?? now),
   }
 }
@@ -42,7 +43,7 @@ function normalizeContext(raw: any): RepoContext {
   return { id, repo, name: String(raw.name ?? 'Session').slice(0, 60), terminals: stored.map(value => normalizeResource(value, id, repo)), createdAt: String(raw.createdAt ?? now), updatedAt: String(raw.updatedAt ?? now) }
 }
 
-export const persistedResource = (resource: TerminalResource): TerminalResource => ({ ...resource, terminalRunning: false })
+export const persistedResource = ({ activity: _live, ...resource }: TerminalResource): TerminalResource => ({ ...resource, terminalRunning: false })
 export const persistedContext = (context: RepoContext): RepoContext => ({ ...context, terminals: context.terminals.map(persistedResource) })
 export const persistedWorkspace = (state: Workspace): Workspace => ({ ...state, contexts: state.contexts.map(persistedContext) })
 /** Wire state includes live terminal-running flags; disk state always resets them. */

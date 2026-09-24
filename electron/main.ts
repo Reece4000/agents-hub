@@ -1,9 +1,10 @@
-import { app, BrowserWindow, Menu, ipcMain, dialog, shell, clipboard } from 'electron'
+import { app, BrowserWindow, Menu, Notification, ipcMain, dialog, shell, clipboard } from 'electron'
 import { join, basename } from 'node:path'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { homedir } from 'node:os'
 import { HubService } from '../server/service'
+import type { AgentActivity, TerminalResource } from '../src/types'
 
 let service: HubService
 let window: BrowserWindow | undefined
@@ -62,6 +63,26 @@ else {
     service.on('tickets', snapshot => window?.webContents.send('agent-hub:tickets', snapshot))
     service.on('board', snapshot => window?.webContents.send('agent-hub:board', snapshot))
     service.on('workspace', state => window?.webContents.send('agent-hub:workspace', state))
+    // Agents that need the person raise a notification and count toward the
+    // Dock badge; a finished turn notifies only when the window is unfocused.
+    const waiting = new Set<string>()
+    const notices = new Set<Notification>()
+    const focusTerminal = (id: string) => { if (!window) create(); window?.show(); window?.focus(); window?.webContents.send('agent-hub:focus-terminal', id) }
+    service.on('activity', ({ resource, previous }: { resource: TerminalResource; previous?: AgentActivity }) => {
+      const activity = resource.activity
+      if (!activity) return
+      if (activity.state === 'waiting') waiting.add(resource.id); else waiting.delete(resource.id)
+      app.setBadgeCount(waiting.size)
+      const needsYou = activity.state === 'waiting' && previous?.state !== 'waiting'
+      const finished = activity.state === 'idle' && previous?.state === 'working' && !window?.isFocused()
+      if ((!needsYou && !finished) || !Notification.isSupported()) return
+      const notice = new Notification({ title: needsYou ? `${resource.name} needs you` : `${resource.name} finished`, body: activity.detail, silent: finished })
+      // Hold a reference until the notification is dismissed so its click handler survives GC.
+      notices.add(notice)
+      notice.on('click', () => { notices.delete(notice); focusTerminal(resource.id) })
+      notice.on('close', () => notices.delete(notice))
+      notice.show()
+    })
     create()
     app.on('activate', () => { if (!window) create() })
   }).catch(error => { dialog.showErrorBox('Agent Hub could not open', String(error)); app.quit() })

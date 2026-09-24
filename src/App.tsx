@@ -3,9 +3,10 @@ import { BookOpen, Bot, Check, Layers3, Folder, Loader2, Moon, Monitor, PanelLef
 import { flushTerminalDraft } from './TerminalComposer'
 import FolderBrowser from './FolderBrowser'
 import LaunchModal, { type TerminalLaunchRequest } from './LaunchModal'
-import TerminalView from './TerminalView'
+import TerminalView, { disposeTerminal } from './TerminalView'
 import BoardCanvas from './BoardCanvas'
 import { bridge } from './bridge'
+import { mostUrgent, STATE_LABELS, terminalState, terminalStatus } from './agentState'
 import { applyThemeVars, customThemeVars, DEFAULT_ACCENT, DEFAULT_CANVAS } from './theme'
 import type { ThemeMode } from './theme'
 import type { Bootstrap, RepoContext, TerminalResource, Workspace } from './types'
@@ -130,6 +131,15 @@ function WorkspaceApp() {
   const startTerminal = async (terminal: TerminalResource) => {
     try { await bridge.invoke('terminalOpen', { id: terminal.id }) } catch (cause) { notify((cause as Error).message) }
   }
+  // A clicked agent notification brings its terminal forward.
+  useEffect(() => bridge.onFocusTerminal?.(id => {
+    const owner = data?.workspace.contexts.find(context => context.terminals.some(terminal => terminal.id === id))
+    if (!owner) return
+    if (owner.repo !== repo) setSelectedRepo(owner.repo)
+    setActiveTerminals(current => ({ ...current, [owner.id]: id }))
+    setView('terminals')
+    void selectContext(owner)
+  }), [data, repo])
   const workOnTask = async (sessionId: string, task: BoardNote) => {
     const session = repoContexts.find(item => item.id === sessionId)
     if (!session) { notify('That Session is no longer available.'); return }
@@ -176,6 +186,7 @@ function WorkspaceApp() {
     try {
       for (const terminal of context.terminals) await flushTerminalDraft(terminal.id)
       await bridge.invoke('deleteContext', { id: context.id })
+      for (const terminal of context.terminals) disposeTerminal(terminal.id)
       setData(old => old ? { ...old, workspace: { ...old.workspace, contexts: old.workspace.contexts.filter(item => item.id !== context.id) } } : old)
       if (activeContext?.id === context.id) setActiveContextId(repoContexts.find(item => item.id !== context.id)?.id ?? null)
     } catch (cause) { notify((cause as Error).message) }
@@ -185,6 +196,7 @@ function WorkspaceApp() {
     setDeleteTerminalId(null)
     try {
       await flushTerminalDraft(terminal.id); await bridge.invoke('deleteTerminal', { id: terminal.id })
+      disposeTerminal(terminal.id)
       const remaining = context.terminals.filter(item => item.id !== terminal.id)
       setData(old => old ? { ...old, workspace: { ...old.workspace, contexts: old.workspace.contexts.map(item => item.id === context.id ? { ...item, terminals: remaining } : item) } } : old)
       if (activeTerminal?.id === terminal.id) setActiveTerminals(current => ({ ...current, [context.id]: remaining[0]?.id ?? '' }))
@@ -226,14 +238,14 @@ function WorkspaceApp() {
       {data.error && <div className="connection-error"><span>{data.error}</span><button onClick={() => void bridge.invoke<Bootstrap>('bootstrap').then(setData)}>Reconnect</button></div>}
       <BoardCanvas repo={repo} sessions={repoContexts} isVisible={view === 'tasks'} onError={notify} onWork={(id, task) => void workOnTask(id, task)} />{view === 'terminals' && <section className="contexts-view" aria-label="Agent Sessions">
         <div className="sessions-strip"><div className="context-tabs" role="tablist" aria-label={`Sessions in ${folderName(repo)}`}>
-          {repoContexts.map(context => <button role="tab" aria-selected={activeContext?.id === context.id} className={`context-tab${activeContext?.id === context.id ? ' active' : ''}`} key={context.id} onClick={() => void selectContext(context)} title={`${context.name} · ${context.terminals.length} terminals`}><span className={`status-dot${context.terminals.some(terminal => terminal.terminalRunning) ? ' working' : ''}`} /><span className="context-tab-name">{context.name}</span><small>{context.terminals.length}</small></button>)}
+          {repoContexts.map(context => <button role="tab" aria-selected={activeContext?.id === context.id} className={`context-tab${activeContext?.id === context.id ? ' active' : ''}`} key={context.id} onClick={() => void selectContext(context)} title={`${context.name} · ${context.terminals.length} terminals · ${STATE_LABELS[mostUrgent(context.terminals)]}`}><span className={`status-dot state-${mostUrgent(context.terminals)}`} /><span className="context-tab-name">{context.name}</span><small>{context.terminals.length}</small></button>)}
           <button className="icon-button context-tab-add" aria-label="New Session" title="New Session" disabled={busy || !repo} onClick={() => startContext(repo)}><Plus size={15} /></button>
         </div><div className="contexts-actions">{activeContext && <button className="small-button" title="Give any running agent the shared board context" onClick={() => void openBoardBrief(activeContext.id)}><BookOpen size={13} />Board brief</button>}{runningCount > 0 && <button className="small-button" disabled={busy} onClick={() => void toggleAll(false)}><Square size={13} />Stop all</button>}{runningCount < allTerminals.length && allTerminals.length > 0 && <button className="small-button" disabled={busy} onClick={() => void toggleAll(true)}><Play size={13} />Start all</button>}{activeContext && <button className="small-button" onClick={() => { setRenameInput(activeContext.name); setRenaming(true) }}><Pencil size={13} />Rename</button>}{activeContext && <button className={`small-button${deleteContextId === activeContext.id ? ' danger-armed' : ''}`} onClick={() => void removeContext(activeContext)}><Trash2 size={13} />{deleteContextId === activeContext.id ? 'Delete Session?' : 'Delete'}</button>}</div></div>
         {activeContext ? <>
           {briefing?.sessionId === activeContext.id && <div className="session-briefing"><div><strong>{briefing.title === 'Board brief' ? briefing.title : `Task: ${briefing.title}`}</strong><span>{briefing.title === 'Board brief' ? 'Send this context to any running agent, or copy it for another CLI.' : 'Send the task and linked context to the active agent.'}</span></div><button className="small-button" onClick={() => void navigator.clipboard.writeText(briefing.text).then(() => notify('Briefing copied.')).catch(error => notify((error as Error).message))}>Copy briefing</button><button className="primary-button" disabled={!activeTerminal?.terminalRunning || activeTerminal.terminalKind === 'shell'} onClick={sendBriefing}>Send to agent</button><button className="icon-button" aria-label="Dismiss briefing" onClick={() => setBriefing(null)}><X size={14} /></button></div>}
           <div className="terminal-tabs" role="tablist" aria-label={`Terminals in ${activeContext.name}`}>
             {activeContext.terminals.map(terminal => <div key={terminal.id} className={`terminal-tab${activeTerminal?.id === terminal.id ? ' active' : ''}`}>
-              <button role="tab" aria-selected={activeTerminal?.id === terminal.id} className="terminal-tab-main" onClick={() => { if (activeTerminal) void flushTerminalDraft(activeTerminal.id); setActiveTerminals(current => ({ ...current, [activeContext.id]: terminal.id })) }}><span className={`status-dot${terminal.terminalRunning ? ' working' : ''}`} /><span>{terminal.name}</span><small>{terminal.agent}</small></button>
+              <button role="tab" aria-selected={activeTerminal?.id === terminal.id} className="terminal-tab-main" onClick={() => { if (activeTerminal) void flushTerminalDraft(activeTerminal.id); setActiveTerminals(current => ({ ...current, [activeContext.id]: terminal.id })) }} title={`${terminal.agent} · ${terminalStatus(terminal)}`}><span className={`status-dot state-${terminalState(terminal)}`} /><span>{terminal.name}</span><small className={`terminal-status state-${terminalState(terminal)}`}>{terminalStatus(terminal)}</small></button>
               {terminal.terminalRunning ? <button className="icon-button" aria-label={`Stop ${terminal.name}`} title={`Stop ${terminal.agent}`} onClick={() => void stopTerminal(terminal)}><Square size={12} /></button> : <button className="icon-button" aria-label={`Start ${terminal.name}`} title={`Start ${terminal.agent}`} onClick={() => void startTerminal(terminal)}><Play size={12} /> </button>}
               {activeContext.terminals.length > 1 && <button className={`icon-button terminal-remove${deleteTerminalId === terminal.id ? ' danger-armed' : ''}`} aria-label={deleteTerminalId === terminal.id ? `Confirm remove ${terminal.name}` : `Remove ${terminal.name}`} title={deleteTerminalId === terminal.id ? 'Click again to remove' : 'Remove terminal'} onClick={() => void removeTerminal(terminal, activeContext)}>{deleteTerminalId === terminal.id ? <Check size={13} /> : <X size={13} />}</button>}
             </div>)}

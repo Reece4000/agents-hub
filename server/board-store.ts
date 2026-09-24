@@ -31,7 +31,19 @@ interface CompletionJournal { command: Extract<BoardCommand, { type: 'completeTa
 
 /** Repo files are the authority. The renderer and agents use this same module
  * for parsing, optimistic writes, migration, search, and completion. */
+/** `passive` stores serve short-lived agent processes (the board CLI and
+ *  MCP server): they never rewrite repo instruction files or start watchers.
+ *  The desktop app's active store owns both. */
+/** Generated agent guide at `.agents-hub/README.md`. Earlier generated
+ *  versions (by content hash) are upgraded in place; a guide someone edited
+ *  is left alone. */
+const BOARD_GUIDE = "# Agent Hub board\n\nThe Tasks canvas is shared repo memory. Read `.agents-hub/notes/*.md` for tasks, notes, and codebase context. Each note has JSON metadata between `---` lines and a Markdown body. `.agents-hub/canvas.json` holds only spatial layout.\n\nIn an Agent Hub terminal the board is available two ways:\n\n- MCP tools named `board_*` (Claude Code and Codex terminals are configured automatically).\n- The `agent-hub-board` command: `agent-hub-board summary`, then `search`, `read`, or `related` with one JSON argument, e.g. `agent-hub-board search '{\"kind\":\"context\",\"text\":\"database\"}'`.\n\nStart with `board_summary`. Its `activeTask` is the Task your Session is working on; read it, search for related Context notes, and keep its status current. Mutations take the `expectedRevision` from a fresh read; read again if another writer changed a note.\n\nOn completion, record the outcome and checked acceptance criteria with `board_complete_task` (`agent-hub-board complete-task`), capturing one concise, evidence-backed codebase fact in a Context note. Give a no-learning reason only when nothing durable was learned. Without the board tools, read these Markdown files directly and leave edits to an Agent Hub terminal.\n\nOld `.agents-hub/tickets/*.json` files are preserved as migration sources. Edit the new note files for current Tasks.\n"
+const LEGACY_GUIDES = new Set(['d418fcfb1107feab0dc9f50f86a26a19b0d7a919a96b3c699bcc5bc92f6c13a8'])
+
+export interface BoardStoreOptions { passive?: boolean }
+
 export class BoardStore extends EventEmitter {
+  constructor(private options: BoardStoreOptions = {}) { super() }
   private watchers = new Map<string, FSWatcher[]>()
   private pollers = new Map<string, NodeJS.Timeout>()
   private signatures = new Map<string, string>()
@@ -58,7 +70,8 @@ export class BoardStore extends EventEmitter {
     if (create) {
       const guide = join(paths.hub, 'README.md')
       if (lstatSync(guide, { throwIfNoEntry: false })?.isSymbolicLink()) throw new Error('Board guide must not be a symlink.')
-      if (!existsSync(guide)) this.atomic(guide, '# Agent Hub board\n\nThe Tasks canvas is shared repo memory. Read `.agents-hub/notes/*.md` for tasks, notes, and codebase context. Each note has JSON metadata between `---` lines and a Markdown body. `.agents-hub/canvas.json` holds only spatial layout.\n\nStart with a board summary, search for related Context notes, and read the active task. In Agent Hub terminals, `AGENT_HUB_REPO`, `AGENT_HUB_ACTIVE_TASK_ID`, `AGENT_HUB_BOARD_RUNTIME`, and `AGENT_HUB_BOARD_CLI` point to the board. Run `ELECTRON_RUN_AS_NODE=1 "$AGENT_HUB_BOARD_RUNTIME" "$AGENT_HUB_BOARD_CLI" summary` and use `search`, `read`, or `related` with a JSON argument. The same executable with `mcp` serves board tools over stdio.\n\nKeep task status current. On completion, record outcome and checked acceptance criteria. Capture a concise codebase fact with evidence paths in a Context note using `complete-task`; give a no-learning reason only when nothing durable was learned. Commands check `expectedRevision`; read again if another writer changed a note.\n\nOld `.agents-hub/tickets/*.json` files are preserved as migration sources. Edit the new note files for current Tasks.\n')
+      const existing = lstatSync(guide, { throwIfNoEntry: false }) ? readFileSync(guide, 'utf8') : null
+      if (existing === null || LEGACY_GUIDES.has(hash(existing))) { if (existing !== BOARD_GUIDE) this.atomic(guide, BOARD_GUIDE) }
     }
     return paths
   }
@@ -99,7 +112,7 @@ export class BoardStore extends EventEmitter {
   private ensureAgentInstructions(repo: string): string[] {
     const errors: string[] = []
     const begin = '<!-- agent-hub:begin -->', end = '<!-- agent-hub:end -->'
-    const block = `${begin}\nThis repository uses the Agent Hub Tasks canvas as shared working context. Read \`.agents-hub/README.md\` before working. Check the board summary and relevant Task, Note, and Codebase context files in \`.agents-hub/notes/\`. In an Agent Hub terminal, use \`ELECTRON_RUN_AS_NODE=1 "$AGENT_HUB_BOARD_RUNTIME" "$AGENT_HUB_BOARD_CLI" summary\` (then \`search\`, \`read\`, or \`related\`) or the board MCP tools. If \`AGENT_HUB_ACTIVE_TASK_ID\` is set, read that Task, keep its status current, and on completion capture one concise, evidence-backed codebase learning using \`complete-task\`. For an agent without the board tools, read the Markdown notes directly and follow the board guide.\n${end}`
+    const block = `${begin}\nThis repository uses the Agent Hub Tasks canvas as shared working context: tasks, notes, and evidence-backed codebase facts in \`.agents-hub/notes/\`. Read \`.agents-hub/README.md\` before working. In an Agent Hub terminal, use the \`board_*\` MCP tools or the \`agent-hub-board\` command (\`agent-hub-board summary\`, then \`search\`, \`read\`, or \`related\`). The summary's \`activeTask\` is the Task your Session is working on: keep its status current and finish it with \`board_complete_task\`, capturing one concise, evidence-backed codebase learning. For an agent without the board tools, read the Markdown notes directly and follow the board guide.\n${end}`
     const files = ['AGENTS.md', 'CLAUDE.md', 'GEMINI.md']
     if (existsSync(join(repo, 'AGENTS.override.md'))) files.push('AGENTS.override.md')
     for (const name of files) {
@@ -247,7 +260,7 @@ export class BoardStore extends EventEmitter {
     let readOnly = false
     try { accessSync(existsSync(p.hub) ? p.hub : p.root, constants.W_OK); this.ensure(repo) }
     catch (error) { readOnly = true; errors.push(`Board is read-only: ${(error as Error).message}`) }
-    if (!readOnly) errors.push(...this.ensureAgentInstructions(p.root).map(error => `Agent instructions: ${error}`))
+    if (!readOnly && !this.options.passive) errors.push(...this.ensureAgentInstructions(p.root).map(error => `Agent instructions: ${error}`))
     if (!readOnly) try {
       const unlock = this.heldLocks.has(repo) ? null : this.lock(repo)
       try { errors.push(...this.migrate(repo)) } finally { unlock?.() }
@@ -290,7 +303,7 @@ export class BoardStore extends EventEmitter {
   load(repo: string): BoardSnapshot {
     const root = resolve(repo)
     const snapshot = this.snapshot(root)
-    this.watch(root)
+    if (!this.options.passive) this.watch(root)
     return snapshot
   }
   private publish(repo: string) {

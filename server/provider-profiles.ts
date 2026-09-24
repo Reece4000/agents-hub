@@ -15,11 +15,19 @@ export const isBuiltinAgent = (kind: TerminalKind): kind is BuiltinAgent => kind
 /** Install locations a GUI-launched app's PATH usually misses. */
 const extraBinDirs = () => [join(homedir(), '.local', 'bin'), join(homedir(), '.npm-global', 'bin'), '/opt/homebrew/bin', '/usr/local/bin']
 
-/** Process environment for agent terminals, with common CLI install
- *  directories appended to PATH. */
+/** Variables that mark the process that launched Agent Hub (a Claude Code
+ *  session, or another Agent Hub terminal). Agents inheriting them behave as
+ *  nested child sessions: Claude Code, for one, then skips saving the
+ *  conversation, so it cannot be resumed. User configuration such as
+ *  ANTHROPIC_* or CLAUDE_CODE_USE_BEDROCK passes through. */
+const HOST_SESSION = /^(CLAUDECODE|CLAUDE_PID|CLAUDE_EFFORT|CLAUDE_AGENT_SDK_VERSION|CLAUDE_PREVIEW_\w+|CLAUDE_CODE_(ENTRYPOINT|SESSION_ID|SESSION_ATTENDED|CHILD_SESSION|HOST_SESSION_ID|MESSAGING_\w+|EXECPATH|SDK_\w+|DESKTOP_APP_VERSION|EAGER_FLUSH|EMIT_TOOL_USE_SUMMARIES|REPORT_FINDINGS|DISABLE_TERMINAL_TITLE|DISABLE_CRON|ENABLE_ASK_USER_QUESTION_TOOL|ENABLE_SDK_FILE_CHECKPOINTING|OAUTH_SCOPES)|AGENT_HUB_\w+)$/
+
+/** Process environment for agent terminals: common CLI install directories
+ *  appended to PATH, and host-session markers removed. */
 export function agentEnvironment(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   const path = [process.env.PATH, ...extraBinDirs(), '/usr/bin', '/bin'].filter(Boolean).join(delimiter)
-  return { ...process.env, PATH: path, ...extra }
+  const inherited = Object.fromEntries(Object.entries(process.env).filter(([key]) => !HOST_SESSION.test(key)))
+  return { ...inherited, PATH: path, ...extra }
 }
 
 /** Interactive login shell for plain command terminals. `$SHELL` wins; macOS/Linux fallbacks follow. */

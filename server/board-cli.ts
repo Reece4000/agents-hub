@@ -5,8 +5,12 @@ const write = (value: unknown) => process.stdout.write(`${JSON.stringify(value)}
 const args = process.argv.slice(2)
 const repo = process.env.AGENT_HUB_REPO || process.cwd()
 let agent: BoardAgent
-try { agent = new BoardAgent(repo) }
+try { agent = new BoardAgent(repo, undefined, process.env.AGENT_HUB_SESSION_ID ?? '') }
 catch (error) { process.stderr.write(`${(error as Error).message}\n`); process.exit(1) }
+
+/** Answer with the client's protocol version when this server speaks it, else the newest one it does. */
+const PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05']
+const negotiate = (requested: unknown) => typeof requested === 'string' && PROTOCOL_VERSIONS.includes(requested) ? requested : PROTOCOL_VERSIONS[0]
 
 if (args[0] === 'mcp') {
   let buffer = ''
@@ -22,7 +26,7 @@ if (args[0] === 'mcp') {
       try {
         const request = JSON.parse(line)
         if (request.id === undefined) continue
-        const result = request.method === 'initialize' ? { protocolVersion: '2025-06-18', capabilities: { tools: { listChanged: false } }, serverInfo: { name: 'agent-hub-board', version: '1.0.0' } }
+        const result = request.method === 'initialize' ? { protocolVersion: negotiate(request.params?.protocolVersion), capabilities: { tools: { listChanged: false } }, serverInfo: { name: 'agent-hub-board', version: '1.1.0' }, instructions: 'Agent Hub board: repository tasks, notes, and evidence-backed codebase facts. Start with board_summary; its activeTask is the Task your Session is working on.' }
           : request.method === 'tools/list' ? { tools: boardTools }
           : request.method === 'tools/call' ? (() => { try { return { content: [{ type: 'text', text: JSON.stringify(agent.call(request.params?.name, request.params?.arguments ?? {})) }] } } catch (error) { return { isError: true, content: [{ type: 'text', text: (error as Error).message }] } } })()
           : request.method === 'ping' ? {}

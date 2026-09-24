@@ -156,3 +156,13 @@ span.folder-chevron{display:inline-block}
 .agent-kind-options input{flex:0 0 15px;margin:1px 0 0}
 .agent-command-fields{display:flex;flex-direction:column;gap:10px}
 @media(max-width:540px){.agent-kind-options{grid-template-columns:repeat(2,minmax(0,1fr))}}
+
+/* Live agent state on Session and terminal tabs. */
+.status-dot.state-working,.terminal-tab-main .status-dot.state-working{background:var(--accent);animation:breathe 1.8s ease-in-out infinite}
+.status-dot.state-starting,.terminal-tab-main .status-dot.state-starting{background:var(--accent);opacity:.6}
+.status-dot.state-waiting,.terminal-tab-main .status-dot.state-waiting{background:var(--warning);box-shadow:0 0 0 3px var(--warning-bg);animation:breathe 1s ease-in-out infinite}
+.status-dot.state-idle,.terminal-tab-main .status-dot.state-idle{background:var(--accent);opacity:.45}
+.status-dot.state-stopped,.terminal-tab-main .status-dot.state-stopped{background:var(--muted);opacity:.5}
+.terminal-status{max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted)}
+.terminal-status.state-waiting{color:var(--warning)}
+.terminal-status.state-working{color:var(--secondary)}

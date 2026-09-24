@@ -22,6 +22,11 @@ export class Terminals extends EventEmitter {
       if (kind !== 'shell' && (!profile?.executable || !Array.isArray(profile.args))) throw new Error('Choose a command for this agent terminal.')
       const screen = new Terminal({ cols, rows, scrollback: 3000, allowProposedApi: true })
       const serializer = new SerializeAddon(); screen.loadAddon(serializer as any)
+      // Agents ask for attention with a bell or a desktop-notification escape
+      // (OSC 9 `message`, OSC 777 `notify;title;body`).
+      screen.onBell(() => this.emit('attention', { id, message: '' }))
+      screen.parser.registerOscHandler(9, data => { if (!/^\d+;/.test(data)) this.emit('attention', { id, message: data }); return true })
+      screen.parser.registerOscHandler(777, data => { const [kind, title = '', body = ''] = data.split(';'); if (kind === 'notify') this.emit('attention', { id, message: body || title }); return true })
       const env = Object.fromEntries(Object.entries(agentEnvironment()).filter(([, v]) => typeof v === 'string')) as Record<string,string>
       for (const [key, value] of Object.entries(extraEnv)) if (typeof value === 'string' && value) env[key] = value
       const executable = kind === 'shell' ? shellExecutable() : profile!.executable
@@ -38,7 +43,7 @@ export class Terminals extends EventEmitter {
     await new Promise<void>(resolve => entry!.screen.write('', resolve))
     return { data: entry.serializer.serialize(), seq:entry.seq, cols:entry.screen.cols,rows:entry.screen.rows,running:entry.alive }
   }
-  write(id:string,data:string) { const e=this.entries.get(id); if(e?.alive && typeof data==='string' && data.length<=1_000_000) e.pty.write(data) }
+  write(id:string,data:string) { const e=this.entries.get(id); if(e?.alive && typeof data==='string' && data.length<=1_000_000) { e.pty.write(data); this.emit('input', { id, data }) } }
   /** Latest screen text for an entry, including ones already exited. Used to
    *  explain an agent that exited before the terminal attached; empty when
    *  there is nothing to read. */
