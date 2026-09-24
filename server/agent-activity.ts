@@ -49,6 +49,12 @@ export class ActivityTracker extends EventEmitter {
     this.entries.set(id, { activity: this.make('starting', 'Starting', hooks ? 'hooks' : 'terminal'), hooks, lastInputAt: 0 })
     this.emit('change', id, this.entries.get(id)!.activity)
   }
+  /** An agent that was already running when the app (re)connected: its
+   *  state is unknown until its next event, so it starts idle. */
+  adopt(id: string, { hooks = false } = {}) {
+    this.entries.set(id, { activity: this.make('idle', 'Still running', hooks ? 'hooks' : 'terminal'), hooks, lastInputAt: 0 })
+    this.emit('change', id, this.entries.get(id)!.activity)
+  }
   exit(id: string, code?: number) {
     const entry = this.entries.get(id)
     if (!entry) return

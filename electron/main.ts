@@ -1,9 +1,12 @@
 import { app, BrowserWindow, Menu, Notification, ipcMain, dialog, shell, clipboard } from 'electron'
 import { join, basename } from 'node:path'
-import { readFileSync } from 'node:fs'
+import { mkdirSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { homedir } from 'node:os'
 import { HubService } from '../server/service'
+import { SupervisorClient } from '../server/supervisor-client'
+import { Terminals, type TerminalHost } from '../server/terminals'
+import { spawn } from 'node:child_process'
 import type { AgentActivity, TerminalResource } from '../src/types'
 import type { BoardNote } from '../shared/board'
 
@@ -16,12 +19,31 @@ app.setName('Agent Hub')
 if (!app.requestSingleInstanceLock()) app.quit()
 else {
   app.on('second-instance', () => { window?.show(); window?.focus() })
-  app.whenReady().then(() => {
+  app.whenReady().then(async () => {
+    const dataDir = process.env.AGENT_HUB_DATA_DIR || (development ? join(root, '.agent-hub') : join(app.getPath('userData'), 'workspace'))
+    // Agent terminals live in a supervisor process so they keep running
+    // after the app quits; the app reattaches on launch. Without the
+    // supervisor, terminals run in this process as before.
+    let terminals: TerminalHost
+    try {
+      mkdirSync(dataDir, { recursive: true })
+      terminals = await SupervisorClient.connect(join(dataDir, 'supervisor.sock'), () => {
+        spawn(process.execPath, [join(__dirname, 'supervisor.cjs'), join(dataDir, 'supervisor.sock')], { detached: true, stdio: 'ignore', env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } }).unref()
+      })
+    } catch { terminals = new Terminals() }
     // An explicit application menu keeps macOS menu validation on Electron-owned
     // items. Without it, the default menu repeatedly logs
     // "representedObject is not a WeakPtrToElectronMenuModelAsNSObject".
-    Menu.setApplicationMenu(Menu.buildFromTemplate([{ role: 'appMenu' }, { role: 'editMenu' }, { role: 'windowMenu' }]))
-    service = new HubService(process.env.AGENT_HUB_DATA_DIR || (development ? join(root, '.agent-hub') : join(app.getPath('userData'), 'workspace')), root, join(__dirname, 'board-cli.cjs'))
+    Menu.setApplicationMenu(Menu.buildFromTemplate([
+      { label: app.name, submenu: [
+        { role: 'about' }, { type: 'separator' }, { role: 'hide' }, { role: 'hideOthers' }, { role: 'unhide' }, { type: 'separator' },
+        { label: 'Quit and Stop Agents', accelerator: 'Alt+Command+Q', click: async () => { await (terminals as { shutdown?: () => Promise<void> }).shutdown?.(); app.quit() } },
+        { role: 'quit', label: 'Quit (Agents Keep Running)' },
+      ] },
+      { role: 'editMenu' }, { role: 'windowMenu' },
+    ]))
+    service = new HubService(dataDir, root, join(__dirname, 'board-cli.cjs'), terminals)
+    service.adoptRunning()
     const create = () => {
       window = new BrowserWindow({ width: 1512, height: 980, minWidth: 860, minHeight: 600, title: 'Agent Hub', backgroundColor: '#17191c', titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 18, y: 19 }, webPreferences: { preload: join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true } })
       window.webContents.setWindowOpenHandler(({ url }) => { if (/^https?:\/\//.test(url)) void shell.openExternal(url); return { action: 'deny' } })

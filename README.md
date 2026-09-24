@@ -50,6 +50,10 @@ Claude Code and Codex terminals (including custom profiles that run them) are la
 
 Other agents are tracked from the screen: output means working, a quiet screen means idle, and a bell or OSC 9/777 notification means the agent needs you. Tabs show each agent's state and current action. An agent that needs you, or finishes while the window is unfocused, raises a notification; the Dock badge counts agents waiting on you. Reopening a stopped agent resumes its conversation; **New conversation** starts fresh. Codex prints a one-line notice that command-line overrides run it without its shared background server.
 
+### Agents keep running
+
+Terminals run in a small supervisor process, so agents keep working after you quit Agent Hub and reattach, screen intact, when you open it again. **Quit and Stop Agents** (⌥⌘Q) stops them instead. The supervisor exits on its own once no terminal is running and no window is connected. Hooks keep reporting to the same local port and token across restarts; events that happen while the app is closed are not replayed, so an agent shows as idle until its next event.
+
 ### Board access from terminals
 
 Every desktop terminal receives `AGENT_HUB_REPO`, `AGENT_HUB_SESSION_ID`, `AGENT_HUB_TERMINAL_ID`, `AGENT_HUB_BOARD_RUNTIME`, and `AGENT_HUB_BOARD_CLI`, and has the `agent-hub-board` command on its PATH. The board summary's `activeTask` is resolved from the Session on every call, so a Task handed to an already-running agent is visible immediately.

@@ -4,7 +4,7 @@ import { join, basename, extname, isAbsolute, normalize, delimiter } from 'node:
 import { homedir } from 'node:os'
 import { v7 as uuid } from 'uuid'
 import { Store, newContext, emptyDraft, liveContext, liveResource, liveWorkspace } from './store'
-import { Terminals } from './terminals'
+import { Terminals, type TerminalHost } from './terminals'
 import { agentEnvironment, availableAgents, customProfile, isBuiltinAgent, nativeProfile } from './provider-profiles'
 import { launchPlan, providerFor, writeBoardShim } from './agent-integration'
 import { ActivityTracker } from './agent-activity'
@@ -26,7 +26,7 @@ const MIME_EXTENSIONS: Record<string, string> = { 'image/png': '.png', 'image/jp
  *  a normal executable in a supervised PTY. */
 export class HubService extends EventEmitter {
   store: Store
-  terminals = new Terminals()
+  terminals: TerminalHost
   ticketStore = new TicketStore()
   boardStore = new BoardStore()
   dictation = new DictationService()
@@ -38,7 +38,7 @@ export class HubService extends EventEmitter {
   /** Directory holding the `agent-hub-board` command, prepended to terminal PATHs. */
   private boardBin = ''
   activity = new ActivityTracker()
-  private events = new AgentEventServer((id, payload) => this.agentEvent(id, payload))
+  private events: AgentEventServer
   /** Messages waiting for their terminal's agent to be idle, per terminal. */
   private outbox = new Map<string, string[]>()
   /** Questions already seen per repo (task id + time asked), so only new ones notify. */
@@ -46,8 +46,9 @@ export class HubService extends EventEmitter {
   /** Terminals launched to resume a conversation, with their start time, so
    *  a resume the agent rejects can fall back to a fresh conversation. */
   private resumes = new Map<string, number>()
-  constructor(directory: string, initialRepo = process.cwd(), private boardCliPath = '') {
-    super(); this.store = new Store(directory, initialRepo)
+  constructor(directory: string, initialRepo = process.cwd(), private boardCliPath = '', terminals: TerminalHost = new Terminals()) {
+    super(); this.store = new Store(directory, initialRepo); this.terminals = terminals
+    this.events = new AgentEventServer((id, payload) => this.agentEvent(id, payload), join(directory, 'agent-events.json'))
     if (boardCliPath) {
       try { this.boardBin = writeBoardShim(directory, { runtime: process.execPath, cli: boardCliPath }) }
       catch { /* terminals still get AGENT_HUB_BOARD_RUNTIME and AGENT_HUB_BOARD_CLI */ }
@@ -84,6 +85,19 @@ export class HubService extends EventEmitter {
       this.emit('activity', { resource: liveResource(resource), previous })
       this.changed(id)
     })
+  }
+  /** Mark terminals the supervisor kept running while the app was closed
+   *  as running again, so their views reattach instead of starting fresh. */
+  adoptRunning() {
+    // Their hooks post to the saved port, so listen before anything happens.
+    if (this.terminals.runningIds().length) void this.events.start().catch(() => {})
+    for (const id of this.terminals.runningIds()) {
+      let resource: TerminalResource
+      try { resource = this.store.resource(id) } catch { continue }
+      resource.terminalRunning = true
+      this.activity.adopt(id, { hooks: !!(resource.profile && providerFor(resource.terminalKind, resource.profile.executable)) })
+    }
+    this.flush()
   }
   /** Type a message into an agent's terminal as its next prompt. It is sent
    *  once the agent is idle (never over a permission prompt or mid-turn), so

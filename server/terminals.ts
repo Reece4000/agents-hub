@@ -7,11 +7,27 @@ import { SerializeAddon } from '@xterm/addon-serialize'
 import { agentEnvironment, shellExecutable } from './provider-profiles'
 import type { TerminalKind, TerminalProfile } from '../src/types'
 
+type Snapshot = { data: string; seq: number; cols: number; rows: number; running: boolean }
+/** Where agent terminals live: in this process (`Terminals`) or in the
+ *  supervisor process (`SupervisorClient`), which outlives the app. Both
+ *  emit data, exit, attention, and input events. */
+export interface TerminalHost extends EventEmitter {
+  running(id: string): boolean
+  runningIds(): string[]
+  open(id: string, cwd: string, spec: OpenSpec): Promise<Snapshot>
+  write(id: string, data: string): void
+  resize(id: string, cols: number, rows: number): void
+  stop(id: string): Promise<void>
+  screenText(id: string): string
+  close(): void
+}
 export interface OpenSpec { kind: TerminalKind; profile?: TerminalProfile; env?: Record<string, string>; cols?: number; rows?: number }
 type Running = { pty: IPty; screen: HeadlessTerminal; serializer: SerializeAddon; seq: number; alive: boolean; exited: Promise<void>; resolveExit: () => void }
-export class Terminals extends EventEmitter {
+export class Terminals extends EventEmitter implements TerminalHost {
   private entries = new Map<string, Running>()
   running(id: string) { return this.entries.get(id)?.alive ?? false }
+  /** Ids of terminals whose process is still alive. */
+  runningIds() { return [...this.entries].filter(([, entry]) => entry.alive).map(([id]) => id) }
   /** Attach to a terminal, spawning it first when it is not running. Shells
    *  run as a login shell; every other kind runs its profile's executable and
    *  argv directly, with no shell interpolation. */
