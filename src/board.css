@@ -118,7 +118,7 @@
 .kb-organizer-wrap{position:relative;flex:none}
 .kb-organizer-trigger{display:flex;align-items:center;gap:6px;padding:7px 10px;border:1px solid var(--border);border-radius:7px;background:var(--surface);color:var(--text);font-size:12px;cursor:pointer}
 .kb-organizer-trigger.active{border-color:var(--accent);color:var(--accent)}
-.kb-organizer-panel{position:absolute;z-index:45;right:0;top:calc(100% + 8px);width:min(430px,calc(100vw - 32px));max-height:min(72vh,680px);overflow:auto;padding:16px;border:1px solid var(--border);border-radius:12px;background:var(--surface);box-shadow:0 18px 55px #0005;color:var(--text)}
+.kb-organizer-panel{position:absolute;z-index:45;left:0;top:calc(100% + 8px);width:min(430px,calc(100vw - 32px));max-height:min(72vh,680px);overflow:auto;padding:16px;border:1px solid var(--border);border-radius:12px;background:var(--surface);box-shadow:0 18px 55px #0005;color:var(--text)}
 .kb-organizer-panel header,.kb-organizer-last>div:first-child{display:flex;align-items:center;justify-content:space-between;gap:12px}
 .kb-organizer-panel header{margin-bottom:14px}.kb-organizer-panel header div{display:flex;flex-direction:column;gap:3px}.kb-organizer-panel header span,.kb-organizer-explain,.kb-organizer-last span{font-size:11px;color:var(--muted)}
 .kb-organizer-panel header button{border:0;background:transparent;color:inherit;cursor:pointer}.kb-organizer-panel label:not(.kb-organizer-toggle){display:flex;flex-direction:column;gap:5px;margin:10px 0;font-size:11px;font-weight:600}
@@ -194,3 +194,9 @@ button.kb-card-live:hover{filter:brightness(1.12)}
 .kb-hand-menu button:hover{background:var(--hover)}
 .kb-hand-menu small{color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .kb-hand-menu .kb-hand-new{grid-template-columns:auto 1fr;color:var(--accent)}
+
+/* New cards pop in; cards an agent just changed glow briefly. */
+.kb-card.is-new{animation:card-in .32s cubic-bezier(.2,.9,.3,1.25)}
+.kb-card.agent-touched{animation:card-touched 1.6s ease-out}
+@keyframes card-in{from{opacity:0;transform:scale(.86) translateY(8px)}to{opacity:1;transform:none}}
+@keyframes card-touched{0%{box-shadow:0 0 0 2px var(--accent),0 0 24px color-mix(in srgb,var(--accent) 45%,transparent)}100%{box-shadow:0 0 0 0 transparent}}

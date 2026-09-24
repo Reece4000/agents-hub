@@ -85,6 +85,27 @@ export default function BoardCanvas({ repo, sessions, isVisible = true, focusReq
   const initialized = useRef<string | null>(null)
   const positionsRef = useRef(positions), sectionsRef = useRef(sections), viewportRef = useRef(viewport)
   positionsRef.current = positions; sectionsRef.current = sections; viewportRef.current = viewport
+  // Eased camera moves for jumps (search, fit, zoom buttons); direct input
+  // (wheel, drag) cancels a flight in progress.
+  const flight = useRef(0)
+  const flyTo = useCallback((target: Viewport | ((current: Viewport) => Viewport)) => {
+    const start = viewportRef.current
+    const end = typeof target === 'function' ? target(start) : target
+    cancelAnimationFrame(flight.current)
+    if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) { setViewport(end); return }
+    const began = performance.now(), duration = 320
+    const step = (now: number) => {
+      const t = Math.min(1, (now - began) / duration), e = 1 - Math.pow(1 - t, 3)
+      setViewport({ x: start.x + (end.x - start.x) * e, y: start.y + (end.y - start.y) * e, zoom: start.zoom + (end.zoom - start.zoom) * e })
+      if (t < 1) flight.current = requestAnimationFrame(step)
+    }
+    flight.current = requestAnimationFrame(step)
+  }, [])
+  const zoomBy = (delta: number) => flyTo(current => {
+    const zoom = clamp(current.zoom + delta, .35, 1.8), cx = surfaceSize.width / 2, cy = surfaceSize.height / 2
+    return { x: cx - (cx - current.x) * zoom / current.zoom, y: cy - (cy - current.y) * zoom / current.zoom, zoom }
+  })
+  const fitView = () => fit({ ...snapshot, positions: positionsRef.current, sections: sectionsRef.current }, surface.current, flyTo)
   const editorWidth = Math.min(440, Math.max(280, surfaceSize.width - 24))
   const editorHeight = Math.min(600, Math.max(240, surfaceSize.height - 24))
   const visible = useMemo(() => snapshot.notes.filter(note => showDone || note.status !== 'done'), [snapshot.notes, showDone])
@@ -167,7 +188,7 @@ export default function BoardCanvas({ repo, sessions, isVisible = true, focusReq
     const position = positionsRef.current[note.id] ?? { x: 100, y: 100 }
     const section = sectionsRef.current.find(item => item.id === note.sectionId)
     if (section?.collapsed) { void apply({ type: 'updateSection', id: section.id, patch: { collapsed: false } }) }
-    setViewport(current => ({ ...current, x: (surfaceSize.width - editorWidth) / 2 - position.x * current.zoom, y: (surfaceSize.height - editorHeight) / 2 - position.y * current.zoom }))
+    flyTo(current => ({ ...current, x: (surfaceSize.width - editorWidth) / 2 - position.x * current.zoom, y: (surfaceSize.height - editorHeight) / 2 - position.y * current.zoom }))
     setFocusTitleId(null)
   }
   // The command palette asks for a new note or task at the view's center.
@@ -238,12 +259,14 @@ export default function BoardCanvas({ repo, sessions, isVisible = true, focusReq
     return false
   }
   const onWheel = (event: ReactWheelEvent) => {
+    cancelAnimationFrame(flight.current)
     event.preventDefault()
     const rect = surface.current!.getBoundingClientRect()
     if (event.ctrlKey || event.metaKey) setViewport(value => zoomAtCursor(value, event.clientX - rect.left, event.clientY - rect.top, event.deltaY, event.deltaMode, .35, 1.8))
     else setViewport(value => ({ ...value, x: value.x - (event.shiftKey ? event.deltaY : event.deltaX), y: value.y - (event.shiftKey ? 0 : event.deltaY) }))
   }
   const startDrag = (event: ReactPointerEvent, type: Drag['type'], id?: string) => {
+    cancelAnimationFrame(flight.current)
     if (event.button !== 0 || (snapshot.readOnly && type !== 'pan')) return
     event.preventDefault(); event.stopPropagation(); setMenu(null)
     drag.current = { type, id, startX: event.clientX, startY: event.clientY, startViewport: viewportRef.current, startPosition: id ? positionsRef.current[id] : undefined, startSection: type === 'section' || type === 'resize' ? sectionsRef.current.find(s => s.id === id) : undefined, originalPositions: type === 'section' ? { ...positionsRef.current } : undefined, moved: false }
@@ -301,7 +324,7 @@ export default function BoardCanvas({ repo, sessions, isVisible = true, focusReq
       if (event.key === '/' && !event.metaKey && !event.ctrlKey) { event.preventDefault(); searchInput.current?.focus(); setSearchOpen(true); return }
       if (event.key.toLowerCase() === 'n') { event.preventDefault(); void create('note', centerWorld()) }
       if (event.key.toLowerCase() === 't') { event.preventDefault(); void create('task', centerWorld()) }
-      if (event.key.toLowerCase() === 'f') { event.preventDefault(); fit(snapshot, surface.current, setViewport) }
+      if (event.key.toLowerCase() === 'f') { event.preventDefault(); fitView() }
     }
     window.addEventListener('keydown', key); return () => window.removeEventListener('keydown', key)
   }, [snapshot, repo, isVisible, selectedId])
@@ -350,7 +373,7 @@ export default function BoardCanvas({ repo, sessions, isVisible = true, focusReq
         <div className="kb-search-wrap"><Search size={15} /><input ref={searchInput} value={search} onChange={e => { setSearch(e.target.value); setSearchOpen(true) }} onFocus={() => setSearchOpen(true)} placeholder="Search board" aria-label="Search all board notes" /><kbd>/</kbd>{search && <button aria-label="Clear search" onClick={() => setSearch('')}><X size={13} /></button>}
           {searchOpen && search.trim() && <div className="kb-search-results"><div className="kb-search-caption">{matches.length} matching notes · including offscreen</div>{matches.slice(0, 12).map(note => <button key={note.id} onClick={() => focusNote(note)}>{kindIcon(note.kind)}<span><strong>{note.title}</strong><small>{kindLabel[note.kind]}{note.status ? ` · ${statusLabel[note.status]}` : ''}</small></span><ArrowDownRight size={13} /></button>)}{!matches.length && <p>No matches. Try another subject or clear the filter.</p>}</div>}</div>
         <div className="kb-filter-wrap"><button className="kb-filter-trigger" aria-expanded={filterOpen} onClick={() => setFilterOpen(value => !value)}>{filter === 'all' ? 'All' : filter === 'context' ? 'Context' : filter === 'task' ? 'Tasks' : 'Notes'} <span>{filter === 'all' ? snapshot.notes.length : counts[filter]}</span><ChevronDown size={13} /></button>{filterOpen && <div className="kb-filter-popover"><div className="kb-filter-set">{([['all', 'All', snapshot.notes.length], ['task', 'Tasks', counts.task], ['context', 'Context', counts.context], ['note', 'Notes', counts.note]] as const).map(([value, label, count]) => <button key={value} className={filter === value ? 'active' : ''} onClick={() => { setFilter(value); setFilterOpen(false) }}>{label}<span>{count}</span></button>)}</div><div className="kb-filter-right"><button onClick={() => setShowDone(v => !v)}>{showDone ? 'Hide completed' : 'Show completed'}</button><button onClick={() => { setFilterOpen(false); void loadTrash() }}><Trash2 size={12} /> Trash</button></div></div>}</div>
-        <button className="kb-tool-icon" title="Fit all notes (F)" aria-label="Fit all notes" onClick={() => fit(snapshot, surface.current, setViewport)}><Maximize2 size={16} /></button>
+        <button className="kb-tool-icon" title="Fit all notes (F)" aria-label="Fit all notes" onClick={fitView}><Maximize2 size={16} /></button>
       </div>
     </header>
     {!!snapshot.errors.length && <div className="kb-warning" role="alert"><CircleHelp size={14} /><span>{snapshot.errors.slice(0, 2).join(' · ')}</span><button onClick={() => void refresh()}>Refresh</button></div>}
@@ -367,6 +390,8 @@ export default function BoardCanvas({ repo, sessions, isVisible = true, focusReq
           const editing = selectedId === note.id
           const dimmed = !matchIds.has(note.id)
           const live = liveAgent(note, sessions)
+          const age = Date.now() - new Date(note.updatedAt).getTime()
+          const fresh = Date.now() - new Date(note.createdAt).getTime() < 4000 ? ' is-new' : age < 4000 && note.updatedBy !== 'person' ? ' agent-touched' : ''
           const lastLog = note.log?.at(-1)
           return <article
             key={note.id}
@@ -387,7 +412,7 @@ export default function BoardCanvas({ repo, sessions, isVisible = true, focusReq
               if (suppressOpen.current === note.id) { suppressOpen.current = null; event.preventDefault(); event.stopPropagation(); return }
               if (linkFrom && linkFrom !== note.id) { event.preventDefault(); event.stopPropagation(); void connectNotes(linkFrom, note.id) }
             }}
-            className={`kb-card kind-${note.kind}${editing ? ' editing selected' : ''}${dimmed ? ' dimmed' : ''}${linkFrom && linkFrom !== note.id ? ' link-target' : ''}${note.question ? ' asking' : ''}${live ? ` live-${live.state}` : ''}${draggingAgent && canTake(note) ? ' drop-ready' : ''}${dropTarget === note.id ? ' drop-target' : ''}`}
+            className={`kb-card kind-${note.kind}${editing ? ' editing selected' : ''}${dimmed ? ' dimmed' : ''}${linkFrom && linkFrom !== note.id ? ' link-target' : ''}${note.question ? ' asking' : ''}${live ? ` live-${live.state}` : ''}${draggingAgent && canTake(note) ? ' drop-ready' : ''}${dropTarget === note.id ? ' drop-target' : ''}${fresh}`}
             onDragOver={event => { if (!canTake(note) || !event.dataTransfer.types.includes(AGENT_DRAG)) return; event.preventDefault(); event.dataTransfer.dropEffect = 'link'; if (dropTarget !== note.id) setDropTarget(note.id) }}
             onDragLeave={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDropTarget(current => current === note.id ? null : current) }}
             onDrop={event => { const terminalId = event.dataTransfer.getData(AGENT_DRAG); setDropTarget(null); setDraggingAgent(null); if (terminalId && canTake(note)) { event.preventDefault(); onDispatch(note.id, terminalId) } }}
@@ -416,7 +441,7 @@ export default function BoardCanvas({ repo, sessions, isVisible = true, focusReq
         <button className="kb-puck kb-puck-new" title="Start a new agent" onClick={onNewAgent}><span className="kb-puck-face"><Plus size={14} /></span><span className="kb-puck-name">Agent</span></button>
       </div>
       <div className="kb-canvas-hint"><span>{linkFrom ? 'CHOOSE A NOTE TO LINK · ESC TO CANCEL' : 'DOUBLE-CLICK: NOTE · N: NOTE · T: TASK · DRAG: PAN'}</span></div>
-      <div className="kb-zoom"><button aria-label="Zoom out" onClick={() => setViewport(v => ({ ...v, zoom: clamp(v.zoom - .15, .35, 1.8) }))}><Minus size={15} /></button><span>{Math.round(viewport.zoom * 100)}%</span><button aria-label="Zoom in" onClick={() => setViewport(v => ({ ...v, zoom: clamp(v.zoom + .15, .35, 1.8) }))}><Plus size={15} /></button><button aria-label="Fit canvas" onClick={() => fit(snapshot, surface.current, setViewport)}><Focus size={15} /></button></div>
+      <div className="kb-zoom"><button aria-label="Zoom out" onClick={() => zoomBy(-.15)}><Minus size={15} /></button><span>{Math.round(viewport.zoom * 100)}%</span><button aria-label="Zoom in" onClick={() => zoomBy(.15)}><Plus size={15} /></button><button aria-label="Fit canvas" onClick={fitView}><Focus size={15} /></button></div>
     </div>
       {showTrash && <aside className="kb-trash"><header><div><h3>Trash</h3></div><button aria-label="Close trash" onClick={() => setShowTrash(false)}><X size={16} /></button></header>{trash.length ? trash.map(note => <div key={note.id}><strong>{note.title}</strong><span>{kindLabel[note.kind]}</span><button onClick={() => void apply({ type: 'restoreNote', id: note.id }).then(() => loadTrash())}>Restore</button></div>) : <p>No notes in trash.</p>}</aside>}
     </div>
@@ -587,6 +612,17 @@ function Inspector({ repo, note, notes, sections, sessions, focusTitle, onClose,
     if (updated && owner.id === note.id) { savedRef.current = updated; edit(current => ({ ...current, links: updated.links })); setSavedRevision(updated.revision) }
   }
   const [handOpen, setHandOpen] = useState(false)
+  // The agent already on this task, preferring one that is running.
+  const assigned = draft.sessionId ? agents.find(agent => agent.contextId === draft.sessionId && agent.terminalRunning) ?? agents.find(agent => agent.contextId === draft.sessionId) : undefined
+  const wrapUp = async () => {
+    if (!assigned) return
+    const saved = await save()
+    if (!saved) return
+    try {
+      const delivery = await bridge.invoke<'sent' | 'queued'>('terminal:deliver', { id: assigned.id, text: `Please wrap up Task ${saved.id} ("${saved.title}"): verify its acceptance checks, then call board_complete_task with the outcome, the checks you verified, and one concise, evidence-backed codebase learning (or a no-learning reason if nothing durable was learned). Read the Task first for its current revision.` })
+      onError(delivery === 'queued' ? `${assigned.name} will wrap up when it is idle.` : `Asked ${assigned.name} to wrap up.`)
+    } catch (error) { onError((error as Error).message) }
+  }
   const handTo = async (terminalId: string) => {
     setHandOpen(false)
     if (stale) { onError('This task changed on disk. Reload it before handing it over.'); return }
@@ -619,7 +655,7 @@ function Inspector({ repo, note, notes, sections, sessions, focusTitle, onClose,
       <div className="kb-related"><div><span className="kb-eyebrow">LINKED NOTES</span><span>{related.length}</span></div>{related.map(item => <div className="kb-related-row" key={item.id}><button onClick={() => onFocus(item)}>{kindIcon(item.kind)}<span>{item.title}</span><ChevronRight size={13} /></button><button className="kb-unlink" aria-label={`Unlink ${item.title}`} title="Remove link" onClick={() => void unlink(item)}><X size={13} /></button></div>)}<p>On the canvas, drag the link handle from one note to another. You can also click the handle, then click the destination.</p></div>
       {history && <div className="kb-history"><span className="kb-eyebrow">PREVIOUS VERSIONS</span>{history.map(item => <button key={item.revision} onClick={() => { replaceDraft({ ...item.note, revision: savedRevision }); setHistory(null) }}>{date(item.note.updatedAt)} · {item.note.title}</button>)}{!history.length && <p>No earlier versions yet.</p>}</div>}
       {draft.kind === 'task' && learning && <div className="kb-learning"><div className="kb-learning-head"><BookOpen size={16} /><span>Codebase context</span></div><p>Record a fact another Session should be able to retrieve.</p><label>Update existing context<select value={learningTarget} onChange={e => { const id = e.target.value; setLearningTarget(id); const target = notes.find(n => n.id === id); if (target) { setLearningTitle(target.title); setLearningSubject(target.subject ?? ''); setLearningBody(target.body); setEvidence((target.evidence ?? []).map(x => x.path).join('\n')) } }}><option value="">Create new context note</option>{notes.filter(n => n.kind === 'context').map(n => <option key={n.id} value={n.id}>{n.title}</option>)}</select></label><label>Title<input value={learningTitle} onChange={e => setLearningTitle(e.target.value)} placeholder="Specific codebase fact" /></label><label>Subject<input value={learningSubject} onChange={e => setLearningSubject(e.target.value)} placeholder="e.g. database migrations" /></label><label>Concise fact<textarea rows={4} value={learningBody} onChange={e => setLearningBody(e.target.value)} placeholder="What did the code or tests prove?" /></label><label>Evidence paths<textarea rows={2} value={evidence} onChange={e => setEvidence(e.target.value)} placeholder="One file path per line" /></label><div className="kb-learning-or">or</div><label>No durable learning<input value={noLearning} onChange={e => setNoLearning(e.target.value)} placeholder="Why nothing needs to be saved" /></label><div className="kb-learning-actions"><button onClick={() => setLearning(false)}>Cancel</button><button className="kb-action" onClick={() => void complete()}>Complete task</button></div></div>}
-    </div><footer className="kb-inspector-actions"><button title="View history" aria-label="View note history" onClick={() => void openHistory()}><History size={16} /></button>{draft.kind === 'task' && !learning && draft.status !== 'done' && <div className="kb-hand"><button className="kb-work" aria-expanded={handOpen} onClick={() => setHandOpen(value => !value)}><Command size={14} /> Hand to agent</button>{handOpen && <div className="kb-hand-menu" role="menu">{agents.map(agent => <button role="menuitem" key={agent.id} onClick={() => void handTo(agent.id)}><span className={`status-dot state-${terminalState(agent)}`} /><strong>{agent.name}</strong><small>{terminalStatus(agent)}</small></button>)}<button role="menuitem" className="kb-hand-new" onClick={() => { setHandOpen(false); onNewAgent() }}><Plus size={13} /> New agent…</button></div>}</div>}{draft.kind === 'task' && !learning && <button className="kb-work" onClick={() => setLearning(true)}><Check size={14} /> Complete</button>}<span className={`kb-save-status state-${saveState}`} role="status">{stale ? 'Changed elsewhere' : saveState === 'error' ? 'Save failed' : dirty || saveState === 'saving' ? 'Saving…' : 'Saved'}</span>{saveState === 'error' && <button onClick={() => void save()}>Retry</button>}</footer>
+    </div><footer className="kb-inspector-actions"><button title="View history" aria-label="View note history" onClick={() => void openHistory()}><History size={16} /></button>{draft.kind === 'task' && !learning && draft.status !== 'done' && <div className="kb-hand"><button className="kb-work" aria-expanded={handOpen} onClick={() => setHandOpen(value => !value)}><Command size={14} /> Hand to agent</button>{handOpen && <div className="kb-hand-menu" role="menu">{agents.map(agent => <button role="menuitem" key={agent.id} onClick={() => void handTo(agent.id)}><span className={`status-dot state-${terminalState(agent)}`} /><strong>{agent.name}</strong><small>{terminalStatus(agent)}</small></button>)}<button role="menuitem" className="kb-hand-new" onClick={() => { setHandOpen(false); onNewAgent() }}><Plus size={13} /> New agent…</button></div>}</div>}{draft.kind === 'task' && !learning && draft.status !== 'done' && assigned && <button className="kb-work" title={`Ask ${assigned.name} to verify, complete, and capture what it learned`} onClick={() => void wrapUp()}><Check size={14} /> Wrap up</button>}{draft.kind === 'task' && !learning && <button className="kb-work" onClick={() => setLearning(true)}>{assigned ? 'Complete myself' : <><Check size={14} /> Complete</>}</button>}<span className={`kb-save-status state-${saveState}`} role="status">{stale ? 'Changed elsewhere' : saveState === 'error' ? 'Save failed' : dirty || saveState === 'saving' ? 'Saving…' : 'Saved'}</span>{saveState === 'error' && <button onClick={() => void save()}>Retry</button>}</footer>
   </div>
 }
 
