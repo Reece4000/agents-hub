@@ -4,7 +4,7 @@ import { mkdirSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { homedir } from 'node:os'
 import { HubService } from '../server/service'
-import { SupervisorClient } from '../server/supervisor-client'
+import { SupervisorClient, supervisorSocketPath } from '../server/supervisor-client'
 import { Terminals, type TerminalHost } from '../server/terminals'
 import { spawn } from 'node:child_process'
 import type { AgentActivity, TerminalResource } from '../src/types'
@@ -27,8 +27,9 @@ else {
     let terminals: TerminalHost
     try {
       mkdirSync(dataDir, { recursive: true })
-      terminals = await SupervisorClient.connect(join(dataDir, 'supervisor.sock'), () => {
-        spawn(process.execPath, [join(__dirname, 'supervisor.cjs'), join(dataDir, 'supervisor.sock')], { detached: true, stdio: 'ignore', env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } }).unref()
+      const socketPath = supervisorSocketPath(dataDir)
+      terminals = await SupervisorClient.connect(socketPath, () => {
+        spawn(process.execPath, [join(__dirname, 'supervisor.cjs'), socketPath], { detached: true, stdio: 'ignore', env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } }).unref()
       })
     } catch { terminals = new Terminals() }
     // An explicit application menu keeps macOS menu validation on Electron-owned

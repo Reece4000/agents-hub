@@ -19,6 +19,8 @@ import type { BoardCommand, BoardNote, BoardQuery } from '../shared/board'
 import type { Attachment, Bootstrap, RepoContext, TerminalKind, TerminalProfile, TerminalResource, Ticket } from '../src/types'
 import { normalizeThemeColor, themeEnvironment } from '../src/theme'
 
+/** Screen text of a startup or confirmation dialog that typed input would answer. */
+const BLOCKING_PROMPT = /trust this (folder|directory|workspace)|Do you trust|Enter to confirm|Press Enter to continue|\(y\/n\)|\[y\/N\]|\[Y\/n\]/i
 const MIME_EXTENSIONS: Record<string, string> = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/webp': '.webp', 'image/gif': '.gif', 'application/pdf': '.pdf', 'text/plain': '.txt' }
 
 /** Agent Hub stores repo-local tickets, named terminal contexts, and terminal
@@ -102,18 +104,25 @@ export class HubService extends EventEmitter {
   /** Type a message into an agent's terminal as its next prompt. It is sent
    *  once the agent is idle (never over a permission prompt or mid-turn), so
    *  a briefing or an answer can be handed over while the agent is busy. */
-  deliver(id: string, message: string): 'sent' | 'queued' {
+  async deliver(id: string, message: string): Promise<'sent' | 'queued'> {
     const queue = this.outbox.get(id) ?? []
     queue.push(message)
     this.outbox.set(id, queue)
-    this.flushOutbox(id)
-    return this.outbox.has(id) ? 'queued' : 'sent'
+    await this.flushOutbox(id)
+    return queue.includes(message) ? 'queued' : 'sent'
   }
-  private flushOutbox(id: string) {
+  private flushing = new Set<string>()
+  private async flushOutbox(id: string) {
     const queue = this.outbox.get(id)
-    if (!queue?.length || !this.terminals.running(id)) return
+    if (!queue?.length || !this.terminals.running(id) || this.flushing.has(id)) return
     const state = this.activity.get(id)?.state
     if (state && state !== 'idle') return
+    // Never type into a dialog: a message's Enter would answer it.
+    this.flushing.add(id)
+    let screen = ''
+    try { screen = await this.terminals.peek(id) } catch { /* treat an unreadable screen as clear */ } finally { this.flushing.delete(id) }
+    if (BLOCKING_PROMPT.test(screen.slice(-2500))) { this.activity.attention(id, 'Answer the prompt in the terminal'); return }
+    if (!this.outbox.get(id)?.length || this.activity.get(id)?.state !== state) return
     const message = queue.shift()!
     if (!queue.length) this.outbox.delete(id)
     this.terminals.write(id, `\x1b[200~${message}\x1b[201~`)
@@ -319,7 +328,7 @@ export class HubService extends EventEmitter {
             if (profile) profile = { ...profile, args: plan.args }
             Object.assign(boardEnv, plan.env)
             if (resource.conversationId) this.resumes.set(resource.id, Date.now()); else this.resumes.delete(resource.id)
-            this.activity.start(resource.id, { hooks: !!hookUrl })
+            this.activity.start(resource.id, { hooks: !!hookUrl, awaitReady: !!hookUrl && provider === 'claude' })
           }
           const snapshot = await this.terminals.open(resource.id, resource.cwd ?? resource.repo, { kind: resource.terminalKind, profile, env: boardEnv, cols: args.cols, rows: args.rows })
           resource.terminalRunning = snapshot.running
@@ -403,7 +412,7 @@ export class HubService extends EventEmitter {
         const note = this.boardStore.apply(repo, { type: 'answerQuestion', id, answer: String(args.answer ?? '') }) as BoardNote
         let delivery: 'sent' | 'queued' | 'none' = 'none'
         if (question?.terminalId) {
-          try { this.store.resource(question.terminalId); delivery = this.deliver(question.terminalId, `Answer to your question on Task ${id} ("${question.text}"):\n\n${String(args.answer).trim()}`) }
+          try { this.store.resource(question.terminalId); delivery = await this.deliver(question.terminalId, `Answer to your question on Task ${id} ("${question.text}"):\n\n${String(args.answer).trim()}`) }
           catch { /* the asking terminal was deleted; the answer stays in the Task log */ }
         }
         return { note, delivery }
@@ -458,13 +467,13 @@ export class HubService extends EventEmitter {
         if (task.status === 'done') throw new Error('This Task is already done.')
         const note = this.boardStore.apply(repo, { type: 'updateNote', id: task.id, expectedRevision: task.revision, patch: { sessionId: resource.contextId, agent: this.agentName(resource), status: task.question ? task.status : 'working', updatedBy: 'person' } }) as BoardNote
         if (!this.terminals.running(resource.id)) await this.invoke('terminalOpen', { id: resource.id })
-        const delivery = this.deliver(resource.id, this.taskBriefing(repo, task.id))
+        const delivery = await this.deliver(resource.id, this.taskBriefing(repo, task.id))
         return { note, delivery }
       }
       case 'terminal:deliver': {
         const resource = this.store.resource(String(args.id))
         if (resource.terminalKind === 'shell') throw new Error('Choose an agent terminal, or copy the text into a shell.')
-        return this.deliver(resource.id, String(args.text ?? ''))
+        return await this.deliver(resource.id, String(args.text ?? ''))
       }
       case 'board:handoff': return this.boardBriefing(this.repo(args.repo), String(args.sessionId))
       case 'preferences': {

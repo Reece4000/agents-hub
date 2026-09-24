@@ -48,6 +48,7 @@ export async function runSupervisor(socketPath: string, { idleMs = IDLE_EXIT_MS,
       case 'input': terminals.write(id, typeof params.data === 'string' ? params.data : ''); return null
       case 'resize': terminals.resize(id, Number(params.cols), Number(params.rows)); return null
       case 'stop': await terminals.stop(id); return null
+      case 'screen': return terminals.peek(id)
       case 'list': return terminals.runningIds().map(resourceId => ({ resourceId, generation: generation(resourceId), running: true }))
       case 'shutdown': setImmediate(shutdown); return null
       default: throw coded('bad-params', `Unsupported method: ${request.method}.`)

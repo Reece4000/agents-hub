@@ -1,9 +1,21 @@
 import { EventEmitter } from 'node:events'
 import { connect, type Socket } from 'node:net'
+import { createHash } from 'node:crypto'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { isStaleGeneration, parseSupervisorFrame, SUPERVISOR_PROTOCOL_VERSION, type SupervisorEvent, type SupervisorMethod, type SupervisorResponse } from './supervisor-protocol'
 import type { OpenSpec } from './terminals'
 
 type Snapshot = { data: string; seq: number; cols: number; rows: number; running: boolean }
+
+/** The supervisor socket for a data directory. Unix socket paths are
+ *  limited to about 100 bytes, so a long data directory gets a stable,
+ *  hashed socket name in the system temp directory instead. */
+export function supervisorSocketPath(dataDir: string) {
+  const preferred = join(dataDir, 'supervisor.sock')
+  if (Buffer.byteLength(preferred) <= 100) return preferred
+  return join(tmpdir(), `agent-hub-${createHash('sha256').update(dataDir).digest('hex').slice(0, 16)}.sock`)
+}
 
 /** The app's side of the supervisor: the same surface as the in-process
  *  `Terminals` (open, write, resize, stop, running, and data/exit/attention/
@@ -97,6 +109,7 @@ export class SupervisorClient extends EventEmitter {
   resize(id: string, cols: number, rows: number) { void this.request('resize', { id, cols, rows }).catch(() => {}) }
   async stop(id: string) { await this.request('stop', { id }) }
   screenText(id: string) { return this.tails.get(id) ?? '' }
+  async peek(id: string) { return String(await this.request('screen', { id }) ?? '') }
   /** Stop every terminal and the supervisor itself. */
   async shutdown() { await this.request('shutdown').catch(() => {}); this.socket.end() }
   /** Disconnect; the supervisor keeps the terminals running. */

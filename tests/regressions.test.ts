@@ -130,3 +130,12 @@ test('saved attachments keep a file extension so agents recognize their type', (
     assert.doesNotMatch(service.saveAttachment({ name: 'notes', mime: 'application/x-unknown', base64: 'aGk=' }).path!, /\.[a-z]+$/)
   } finally { service.close(); rmSync(dir, { recursive: true, force: true }) }
 })
+
+test('a terminal screen reads as plain text for prompt detection', { timeout: 5000 }, async () => {
+  const terminals = new Terminals()
+  try {
+    await terminals.open('p', '/tmp', { kind: 'custom', profile: { label: 'printf', executable: '/usr/bin/printf', args: ['\x1b[2J\x1b[3;5HYes, I trust\x1b[3;18Hthis folder\\n'] }, cols: 60, rows: 10 })
+    await new Promise(resolve => setTimeout(resolve, 300))
+    assert.match(await terminals.peek('p'), /Yes, I trust this folder/)
+  } finally { terminals.close() }
+})

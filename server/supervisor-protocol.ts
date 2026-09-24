@@ -13,6 +13,7 @@ export const SUPERVISOR_METHODS = [
   'resize',
   'stop',
   'list',
+  'screen',
   'shutdown',
 ] as const
 export type SupervisorMethod = (typeof SUPERVISOR_METHODS)[number]

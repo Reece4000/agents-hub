@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { runSupervisor } from '../server/supervisor'
-import { SupervisorClient } from '../server/supervisor-client'
+import { SupervisorClient, supervisorSocketPath } from '../server/supervisor-client'
 import { HubService } from '../server/service'
 
 const cat = { kind: 'custom' as const, profile: { label: 'cat', executable: '/bin/cat', args: [] }, cols: 80, rows: 24 }
@@ -71,4 +71,11 @@ test('the service adopts agents that kept running while the app was closed', { t
     await second.invoke('terminalClose', { id })
     second.close()
   } finally { supervisor.close(); rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('long data directories get a short, stable socket path', () => {
+  assert.equal(supervisorSocketPath('/Users/me/data'), '/Users/me/data/supervisor.sock')
+  const long = `/Users/me/${'nested/'.repeat(20)}data`
+  const path = supervisorSocketPath(long)
+  assert.ok(Buffer.byteLength(path) <= 104 && path === supervisorSocketPath(long))
 })

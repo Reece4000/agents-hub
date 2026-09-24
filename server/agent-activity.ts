@@ -7,8 +7,11 @@ export const QUIET_MS = 2000
 /** Output this soon after a keystroke is treated as echo, not agent work. */
 const ECHO_MS = 300
 
-type Entry = { activity: AgentActivity; hooks: boolean; lastInputAt: number; quiet?: NodeJS.Timeout }
+type Entry = { activity: AgentActivity; hooks: boolean; awaitReady?: boolean; lastInputAt: number; quiet?: NodeJS.Timeout }
 type Json = Record<string, unknown>
+/** Input the terminal emulator sends by itself (focus reports, device
+ *  attribute and cursor position replies, OSC answers), not the person. */
+const EMULATOR_REPLY = /^(?:\x1b\[[IO]|\x1b\[[?>][\d;]*c|\x1b\[\d+;\d+R|\x1b\[\?[\d;]*\$y|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\))+$/
 const text = (value: unknown) => typeof value === 'string' ? value : ''
 const clip = (value: string, max = 80) => { const line = value.replace(/\s+/g, ' ').trim(); return line.length > max ? `${line.slice(0, max - 1)}…` : line }
 
@@ -42,11 +45,13 @@ export class ActivityTracker extends EventEmitter {
   providerSession(id: string) { return this.entries.get(id)?.activity.providerSessionId }
 
   /** `hooks`: the agent was launched with structured reporting, so screen
-   *  output is not read as work (only a quiet screen ends `starting`). */
-  start(id: string, { hooks = false } = {}) {
+   *  output is not read as work. `awaitReady`: the agent reports readiness
+   *  itself (Claude Code's SessionStart), so a quiet screen before that is a
+   *  startup prompt waiting for the person (folder trust, login), not idle. */
+  start(id: string, { hooks = false, awaitReady = false } = {}) {
     const previous = this.entries.get(id)
     if (previous?.quiet) clearTimeout(previous.quiet)
-    this.entries.set(id, { activity: this.make('starting', 'Starting', hooks ? 'hooks' : 'terminal'), hooks, lastInputAt: 0 })
+    this.entries.set(id, { activity: this.make('starting', 'Starting', hooks ? 'hooks' : 'terminal'), hooks, awaitReady, lastInputAt: 0 })
     this.emit('change', id, this.entries.get(id)!.activity)
   }
   /** An agent that was already running when the app (re)connected: its
@@ -69,7 +74,7 @@ export class ActivityTracker extends EventEmitter {
 
   input(id: string, data: string) {
     const entry = this.entries.get(id)
-    if (!entry) return
+    if (!entry || EMULATOR_REPLY.test(data)) return
     entry.lastInputAt = this.now()
     // Answering a prompt or submitting a message hands control back to the agent.
     if (entry.activity.state === 'waiting' || (entry.activity.state === 'idle' && data.includes('\r'))) this.set(id, 'working', entry.activity.state === 'waiting' ? 'Continuing' : 'Thinking')
@@ -87,7 +92,7 @@ export class ActivityTracker extends EventEmitter {
   private quiet(id: string) {
     const entry = this.entries.get(id)
     if (!entry) return
-    if (entry.activity.state === 'starting') this.set(id, 'idle', 'Ready')
+    if (entry.activity.state === 'starting') this.set(id, entry.awaitReady ? 'waiting' : 'idle', entry.awaitReady ? 'Answer the prompt in the terminal' : 'Ready')
     else if (entry.activity.state === 'working' && !entry.hooks) this.set(id, 'idle', 'Quiet')
   }
   /** Terminal bell, or an OSC 9/777 desktop notification with its message. */
@@ -119,7 +124,9 @@ export class ActivityTracker extends EventEmitter {
       case 'Notification': {
         const type = text(payload.notification_type)
         if (type === 'idle_prompt') return mark('idle', entry.activity.state === 'idle' ? entry.activity.detail : 'Waiting for your next message')
-        if (/permission|elicitation|needs_input/.test(type) || !type) return mark('waiting', clip(text(payload.message)) || 'Needs your input')
+        // Keep a specific reason ("Approve editing greet.ts") over the generic
+        // notification that follows it.
+        if (/permission|elicitation|needs_input/.test(type) || !type) return mark('waiting', entry.activity.state === 'waiting' ? entry.activity.detail : clip(text(payload.message)) || 'Needs your input')
         return
       }
       case 'Stop': return mark('idle', clip(text(payload.last_assistant_message)) || 'Finished')

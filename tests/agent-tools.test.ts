@@ -81,7 +81,7 @@ test('answers and briefings wait in an outbox until the agent is idle', async ()
     service.terminals.write = (_id: string, data: string) => { writes.push(data) }
     service.activity.start(id, { hooks: true })
     service.activity.hook(id, { hook_event_name: 'UserPromptSubmit' })
-    assert.equal(service.deliver(id, 'Answer: drop it'), 'queued')
+    assert.equal(await service.deliver(id, 'Answer: drop it'), 'queued')
     assert.deepEqual(writes, [], 'nothing is typed while the agent works')
     service.activity.hook(id, { hook_event_name: 'Stop' })
     await new Promise(resolve => setTimeout(resolve, 700))
@@ -118,4 +118,31 @@ test('a context pack gives an agent each selected note\'s essentials', async () 
   assert.match(text, /^Context from the Agent Hub board: 2 notes/)
   assert.match(text, /### Task AH-000000000001: Ship drawer \(working\)\nDock terminals\nAcceptance:\n- Opens with ⌘J\nOpen question: Left or right\?/)
   assert.match(text, /### Codebase context AH-000000000002: Drawer width\nPersisted per viewer\nEvidence: src\/AgentDrawer.tsx/)
+})
+
+test('queued messages wait while a startup prompt is on screen, and Claude waits for SessionStart', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'agent-hub-prompt-'))
+  const service = new HubService(dir, dir)
+  const writes: string[] = []
+  try {
+    const context = await service.invoke('newContext', { repo: dir, name: 'ops', terminalKind: 'custom', profile: { label: 'Env', executable: '/usr/bin/env', args: [] } })
+    const id = context.terminals[0].id
+    let screen = 'Quick safety check: Is this a project you trust?\n❯ No, exit\n  Yes, I trust this folder\nEnter to confirm · Esc to cancel'
+    service.terminals.running = () => true
+    service.terminals.peek = async () => screen
+    service.terminals.write = (_id: string, data: string) => { writes.push(data) }
+    service.activity.start(id, { hooks: true, awaitReady: true })
+    service.activity.output(id)
+    await new Promise(resolve => setTimeout(resolve, 2100))
+    assert.deepEqual([service.activity.get(id)?.state, service.activity.get(id)?.detail], ['waiting', 'Answer the prompt in the terminal'], 'a quiet start before SessionStart is a prompt, not idle')
+    assert.equal(await service.deliver(id, 'Work on the task'), 'queued')
+    service.activity.hook(id, { hook_event_name: 'Stop' })
+    await new Promise(resolve => setTimeout(resolve, 600))
+    assert.deepEqual(writes, [], 'nothing is typed into a dialog')
+    assert.equal(service.activity.get(id)?.state, 'waiting')
+    screen = '> '
+    service.activity.hook(id, { hook_event_name: 'SessionStart' })
+    await new Promise(resolve => setTimeout(resolve, 700))
+    assert.deepEqual(writes, ['\x1b[200~Work on the task\x1b[201~', '\r'])
+  } finally { service.close(); rmSync(dir, { recursive: true, force: true }) }
 })

@@ -19,6 +19,8 @@ export interface TerminalHost extends EventEmitter {
   resize(id: string, cols: number, rows: number): void
   stop(id: string): Promise<void>
   screenText(id: string): string
+  /** The current screen text of a running terminal. */
+  peek(id: string): Promise<string>
   close(): void
 }
 export interface OpenSpec { kind: TerminalKind; profile?: TerminalProfile; env?: Record<string, string>; cols?: number; rows?: number }
@@ -67,6 +69,15 @@ export class Terminals extends EventEmitter implements TerminalHost {
     const e=this.entries.get(id)
     if(!e) return ''
     try { return e.serializer.serialize().slice(-8000) } catch { return '' }
+  }
+  /** The visible screen as plain text lines, after queued output lands. */
+  async peek(id:string) {
+    const e=this.entries.get(id)
+    if(!e) return ''
+    await new Promise<void>(resolve => e.screen.write('', resolve))
+    const buffer=e.screen.buffer.active, lines: string[]=[]
+    for(let row=buffer.viewportY; row<buffer.viewportY+e.screen.rows; row++) lines.push(buffer.getLine(row)?.translateToString(true) ?? '')
+    return lines.join('\n')
   }
   resize(id:string,cols:number,rows:number) { const e=this.entries.get(id); if(!e?.alive || !Number.isInteger(cols)||!Number.isInteger(rows))return; cols=Math.max(20,Math.min(400,cols));rows=Math.max(5,Math.min(200,rows));if(e.screen.cols===cols&&e.screen.rows===rows)return;e.screen.resize(cols,rows);e.pty.resize(cols,rows) }
   async stop(id:string) {

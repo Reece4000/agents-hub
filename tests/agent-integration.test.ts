@@ -31,6 +31,8 @@ test('hook events drive Claude state: ready, thinking, tool detail, permission, 
   assert.equal(activity.get('t')?.detail, 'Editing App.tsx')
   activity.hook('t', { hook_event_name: 'PermissionRequest', tool_name: 'Bash', tool_input: { command: 'npm test' } })
   assert.deepEqual([activity.get('t')?.state, activity.get('t')?.detail], ['waiting', 'Approve running npm test'])
+  activity.hook('t', { hook_event_name: 'Notification', notification_type: 'permission_prompt', message: 'Claude needs your permission' })
+  assert.equal(activity.get('t')?.detail, 'Approve running npm test', 'the generic notification keeps the specific reason')
   activity.input('t', '1')
   assert.equal(activity.get('t')?.state, 'working', 'answering a prompt hands control back')
   activity.hook('t', { hook_event_name: 'Stop', last_assistant_message: 'All tests pass.\nDone.' })
@@ -173,4 +175,14 @@ test('palette matching prefers direct, early, word-start hits and rejects non-ma
   assert.ok(fuzzyScore('canvas', 'Polish canvas navigation') > fuzzyScore('pcn', 'Polish canvas navigation'))
   assert.ok(fuzzyScore('pcn', 'Polish canvas navigation') > 0, 'initials match as a subsequence')
   assert.ok(fuzzyScore('nav', 'navigation drawer') > fuzzyScore('nav', 'canvas navigation'), 'earlier hits rank higher')
+})
+
+test('terminal emulator replies are not mistaken for the person answering', () => {
+  const { activity } = tracker()
+  activity.start('t', { hooks: true })
+  activity.attention('t', 'Approval requested: rm')
+  for (const reply of ['\x1b[I', '\x1b[O', '\x1b[?1;2c', '\x1b[>0;276;0c', '\x1b[24;80R', '\x1b]11;rgb:1717/1919/1c1c\x07']) activity.input('t', reply)
+  assert.equal(activity.get('t')?.state, 'waiting')
+  activity.input('t', '\x1b[B')
+  assert.equal(activity.get('t')?.state, 'working', 'arrow keys are the person')
 })
