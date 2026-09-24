@@ -49,7 +49,7 @@ type Menu = { x: number; y: number; world: BoardPosition; target?: string; secti
 type Capture = { kind: NoteKind; position: BoardPosition; x: number; y: number }
 type Drag = { type: 'pan' | 'note' | 'section' | 'resize'; id?: string; startX: number; startY: number; startViewport: Viewport; startPosition?: BoardPosition; startSection?: BoardSection; originalPositions?: Record<string, BoardPosition>; moved: boolean }
 
-export default function BoardCanvas({ repo, sessions, isVisible = true, focusRequest, onDispatch, onOpenTerminal, onNewAgent, onError }: { repo: string; sessions: RepoContext[]; isVisible?: boolean; focusRequest?: { id: string; nonce: number } | null; onDispatch: (taskId: string, terminalId: string) => void; onOpenTerminal: (terminalId: string) => void; onNewAgent: () => void; onError: (message: string) => void }) {
+export default function BoardCanvas({ repo, sessions, isVisible = true, focusRequest, createRequest, onDispatch, onOpenTerminal, onNewAgent, onError }: { repo: string; sessions: RepoContext[]; isVisible?: boolean; focusRequest?: { id: string; nonce: number } | null; createRequest?: { kind: NoteKind; nonce: number } | null; onDispatch: (taskId: string, terminalId: string) => void; onOpenTerminal: (terminalId: string) => void; onNewAgent: () => void; onError: (message: string) => void }) {
   const agents = useMemo(() => sessions.flatMap(session => session.terminals.filter(terminal => terminal.terminalKind !== 'shell')), [sessions])
   const [draggingAgent, setDraggingAgent] = useState<string | null>(null)
   const [dropTarget, setDropTarget] = useState<string | null>(null)
@@ -170,6 +170,13 @@ export default function BoardCanvas({ repo, sessions, isVisible = true, focusReq
     setViewport(current => ({ ...current, x: (surfaceSize.width - editorWidth) / 2 - position.x * current.zoom, y: (surfaceSize.height - editorHeight) / 2 - position.y * current.zoom }))
     setFocusTitleId(null)
   }
+  // The command palette asks for a new note or task at the view's center.
+  const handledCreate = useRef(0)
+  useEffect(() => {
+    if (!createRequest || handledCreate.current === createRequest.nonce || loading) return
+    handledCreate.current = createRequest.nonce
+    void create(createRequest.kind, centerWorld())
+  }, [createRequest, loading])
   // A notification click (or other caller) asks to bring a note into view.
   const handledFocus = useRef(0)
   useEffect(() => {
@@ -289,9 +296,9 @@ export default function BoardCanvas({ repo, sessions, isVisible = true, focusReq
         }
         return
       }
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); searchInput.current?.focus(); setSearchOpen(true); return }
       const target = event.target as HTMLElement
       if (target.closest('input,textarea,select,[contenteditable=true]')) return
+      if (event.key === '/' && !event.metaKey && !event.ctrlKey) { event.preventDefault(); searchInput.current?.focus(); setSearchOpen(true); return }
       if (event.key.toLowerCase() === 'n') { event.preventDefault(); void create('note', centerWorld()) }
       if (event.key.toLowerCase() === 't') { event.preventDefault(); void create('task', centerWorld()) }
       if (event.key.toLowerCase() === 'f') { event.preventDefault(); fit(snapshot, surface.current, setViewport) }
@@ -340,7 +347,7 @@ export default function BoardCanvas({ repo, sessions, isVisible = true, focusReq
       <div className="kb-capture-actions"><button className="kb-add" disabled={snapshot.readOnly} onClick={() => void create('note', centerWorld())}><Plus size={16} /> Note <kbd>N</kbd></button><button className="kb-task-add" disabled={snapshot.readOnly} onClick={() => void create('task', centerWorld())}><Plus size={15} /> Task</button><button className="kb-more-add" disabled={snapshot.readOnly} aria-label="More ways to add to canvas" title="Add codebase context or section" onClick={e => { const rect = e.currentTarget.getBoundingClientRect(); setMenu({ x: rect.left, y: rect.bottom + 7, world: centerWorld() }) }}><ChevronDown size={15} /></button></div>
       <div className="kb-tools"><span className="kb-storage" title={bridge.desktop ? `Board files: ${repo}/.agents-hub/notes/*.md · layout: ${repo}/.agents-hub/canvas.json` : 'Browser preview: board changes are stored in local browser storage'}><Folder size={13} />{bridge.desktop ? '.agents-hub' : 'Preview storage'}</span>
         <OrganizerPanel repo={repo} snapshot={snapshot} blocked={!!selectedId || !!capture || !!drag.current} onRefresh={refresh} onError={onError} onOrganizing={setOrganizing} />
-        <div className="kb-search-wrap"><Search size={15} /><input ref={searchInput} value={search} onChange={e => { setSearch(e.target.value); setSearchOpen(true) }} onFocus={() => setSearchOpen(true)} placeholder="Search board" aria-label="Search all board notes" /><kbd>⌘ K</kbd>{search && <button aria-label="Clear search" onClick={() => setSearch('')}><X size={13} /></button>}
+        <div className="kb-search-wrap"><Search size={15} /><input ref={searchInput} value={search} onChange={e => { setSearch(e.target.value); setSearchOpen(true) }} onFocus={() => setSearchOpen(true)} placeholder="Search board" aria-label="Search all board notes" /><kbd>/</kbd>{search && <button aria-label="Clear search" onClick={() => setSearch('')}><X size={13} /></button>}
           {searchOpen && search.trim() && <div className="kb-search-results"><div className="kb-search-caption">{matches.length} matching notes · including offscreen</div>{matches.slice(0, 12).map(note => <button key={note.id} onClick={() => focusNote(note)}>{kindIcon(note.kind)}<span><strong>{note.title}</strong><small>{kindLabel[note.kind]}{note.status ? ` · ${statusLabel[note.status]}` : ''}</small></span><ArrowDownRight size={13} /></button>)}{!matches.length && <p>No matches. Try another subject or clear the filter.</p>}</div>}</div>
         <div className="kb-filter-wrap"><button className="kb-filter-trigger" aria-expanded={filterOpen} onClick={() => setFilterOpen(value => !value)}>{filter === 'all' ? 'All' : filter === 'context' ? 'Context' : filter === 'task' ? 'Tasks' : 'Notes'} <span>{filter === 'all' ? snapshot.notes.length : counts[filter]}</span><ChevronDown size={13} /></button>{filterOpen && <div className="kb-filter-popover"><div className="kb-filter-set">{([['all', 'All', snapshot.notes.length], ['task', 'Tasks', counts.task], ['context', 'Context', counts.context], ['note', 'Notes', counts.note]] as const).map(([value, label, count]) => <button key={value} className={filter === value ? 'active' : ''} onClick={() => { setFilter(value); setFilterOpen(false) }}>{label}<span>{count}</span></button>)}</div><div className="kb-filter-right"><button onClick={() => setShowDone(v => !v)}>{showDone ? 'Hide completed' : 'Show completed'}</button><button onClick={() => { setFilterOpen(false); void loadTrash() }}><Trash2 size={12} /> Trash</button></div></div>}</div>
         <button className="kb-tool-icon" title="Fit all notes (F)" aria-label="Fit all notes" onClick={() => fit(snapshot, surface.current, setViewport)}><Maximize2 size={16} /></button>

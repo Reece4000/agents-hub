@@ -166,3 +166,11 @@ test('agent environments drop host-session markers but keep user configuration',
     assert.equal(env.AGENT_HUB_REPO, '/repo', 'explicit values still apply')
   } finally { for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key]; Object.assign(process.env, saved) }
 })
+
+test('palette matching prefers direct, early, word-start hits and rejects non-matches', async () => {
+  const { fuzzyScore } = await import('../src/fuzzy')
+  assert.equal(fuzzyScore('xyz', 'Polish canvas navigation'), -1)
+  assert.ok(fuzzyScore('canvas', 'Polish canvas navigation') > fuzzyScore('pcn', 'Polish canvas navigation'))
+  assert.ok(fuzzyScore('pcn', 'Polish canvas navigation') > 0, 'initials match as a subsequence')
+  assert.ok(fuzzyScore('nav', 'navigation drawer') > fuzzyScore('nav', 'canvas navigation'), 'earlier hits rank higher')
+})

@@ -5,6 +5,8 @@ import FolderBrowser from './FolderBrowser'
 import LaunchModal, { type TerminalLaunchRequest } from './LaunchModal'
 import TerminalView, { disposeTerminal } from './TerminalView'
 import AgentDrawer, { DRAWER_DEFAULT, DRAWER_MAX, DRAWER_MIN } from './AgentDrawer'
+import CommandPalette, { type PaletteAction } from './CommandPalette'
+import type { NoteKind } from '../shared/board'
 import BoardCanvas from './BoardCanvas'
 import { bridge } from './bridge'
 import { mostUrgent, STATE_LABELS, terminalState, terminalStatus } from './agentState'
@@ -229,17 +231,35 @@ function WorkspaceApp() {
     }
     window.addEventListener('keydown', handler); return () => window.removeEventListener('keydown', handler)
   }, [])
-  // ⌘J toggles the terminal drawer, even while a terminal has focus.
+  const [palette, setPalette] = useState(false)
+  const [createRequest, setCreateRequest] = useState<{ kind: NoteKind; nonce: number } | null>(null)
+  const toggleDrawer = () => {
+    setView('tasks')
+    setDrawerId(current => current ? null : lastDrawer.current && allTerminalIds.current.includes(lastDrawer.current) ? lastDrawer.current : agentIds.current[0] ?? allTerminalIds.current[0] ?? null)
+  }
+  // ⌘K opens the command palette and ⌘J toggles the terminal drawer, even
+  // while a terminal has focus.
   useEffect(() => {
     const toggle = (event: KeyboardEvent) => {
-      if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== 'j' || event.shiftKey || event.altKey) return
+      if (!(event.metaKey || event.ctrlKey) || event.shiftKey || event.altKey) return
+      const key = event.key.toLowerCase()
+      if (key === 'k') { event.preventDefault(); event.stopPropagation(); setPalette(value => !value); return }
+      if (key !== 'j') return
       event.preventDefault(); event.stopPropagation()
-      setView('tasks')
-      setDrawerId(current => current ? null : lastDrawer.current && allTerminalIds.current.includes(lastDrawer.current) ? lastDrawer.current : agentIds.current[0] ?? allTerminalIds.current[0] ?? null)
+      toggleDrawer()
     }
     window.addEventListener('keydown', toggle, true); return () => window.removeEventListener('keydown', toggle, true)
   }, [])
   const allTerminalIds = useRef<string[]>([]); allTerminalIds.current = allTerminals.map(item => item.id)
+  const paletteActions: PaletteAction[] = [
+    { id: 'new-task', label: 'New task', hint: 'T on the canvas', keywords: 'create add todo', run: () => { setView('tasks'); setCreateRequest({ kind: 'task', nonce: Date.now() }) } },
+    { id: 'new-note', label: 'New note', hint: 'N on the canvas', keywords: 'create add idea', run: () => { setView('tasks'); setCreateRequest({ kind: 'note', nonce: Date.now() }) } },
+    { id: 'new-agent', label: 'New agent…', hint: 'Start Claude Code, Codex, or any CLI', keywords: 'session terminal launch claude codex cursor', run: () => startContext(repo) },
+    { id: 'drawer', label: 'Toggle terminal drawer', hint: '⌘J', keywords: 'terminal panel', run: toggleDrawer },
+    { id: 'tasks', label: 'Go to Tasks canvas', keywords: 'board view', run: () => setView('tasks') },
+    { id: 'sessions', label: 'Go to Sessions', keywords: 'terminals full screen view', run: () => setView('terminals') },
+    ...(data?.workspace.repos ?? []).filter(item => item !== repo).map(item => ({ id: `repo:${item}`, label: `Switch to ${folderName(item)}`, hint: item, keywords: 'repository folder project', run: () => { setSelectedRepo(item); void bridge.invoke('selectRepo', { repo: item }).catch(() => {}) } })),
+  ]
   const agentIds = useRef<string[]>([]); agentIds.current = agentTerminals.map(item => item.id)
   useEffect(() => {
     if (!settings) return
@@ -266,7 +286,7 @@ function WorkspaceApp() {
     <main className="workspace">
       {data.error && <div className="connection-error"><span>{data.error}</span><button onClick={() => void bridge.invoke<Bootstrap>('bootstrap').then(setData)}>Reconnect</button></div>}
       <div className="tasks-stage" style={view === 'tasks' ? undefined : { display: 'none' }}>
-        <BoardCanvas repo={repo} sessions={repoContexts} isVisible={view === 'tasks'} focusRequest={focusRequest} onError={notify} onDispatch={(taskId, terminalId) => void dispatch(taskId, terminalId)} onOpenTerminal={openDrawer} onNewAgent={() => startContext(repo)} />
+        <BoardCanvas repo={repo} sessions={repoContexts} isVisible={view === 'tasks'} focusRequest={focusRequest} createRequest={createRequest} onError={notify} onDispatch={(taskId, terminalId) => void dispatch(taskId, terminalId)} onOpenTerminal={openDrawer} onNewAgent={() => startContext(repo)} />
         {view === 'tasks' && drawerTerminal && <AgentDrawer terminal={drawerTerminal} sessions={repoContexts} width={drawerWidth} onWidth={resizeDrawer} onSelect={openDrawer} onClose={() => setDrawerId(null)} onError={notify} patch={patchTerminal} themeMode={themeMode} themeBackground={customBg} themeAccent={customAccent}
           onExpand={() => { const owner = repoContexts.find(context => context.terminals.some(item => item.id === drawerTerminal.id)); if (owner) { setActiveTerminals(current => ({ ...current, [owner.id]: drawerTerminal.id })); void selectContext(owner) } setDrawerId(null); setView('terminals') }} />}
       </div>{view === 'terminals' && <section className="contexts-view" aria-label="Agent Sessions">
@@ -291,6 +311,9 @@ function WorkspaceApp() {
     </main>
     {settings && <section ref={settingsPanel} className="settings-panel" aria-label="Settings"><header><h2>Workspace settings</h2><button className="icon-button" aria-label="Close settings" onClick={() => setSettings(false)}><X size={17} /></button></header><label>Appearance</label><div className="theme-options">{([['dark', Moon, 'Dark'], ['light', Sun, 'Light'], ['system', Monitor, 'System']] as const).map(([value, Icon, label]) => <button key={value} aria-pressed={data.workspace.theme === value} onClick={() => void bridge.invoke('preferences', { theme: value })}><Icon size={19} />{label}</button>)}</div><label className="theme-colour">Background<input type="color" aria-label="Custom background colour" value={customBg ?? DEFAULT_CANVAS[themeMode]} onChange={event => void bridge.invoke('preferences', { themeBackground: event.target.value })} /></label><label className="theme-colour">Accent<input type="color" aria-label="Custom accent colour" value={customAccent ?? DEFAULT_ACCENT[themeMode]} onChange={event => void bridge.invoke('preferences', { themeAccent: event.target.value })} /></label><p>Appearance applies to the workspace and terminal. Sessions and drafts save automatically.</p><small className="settings-version">Agent Hub 0.3.0</small></section>}
     {notice && <div className="toast" role="status"><span>{notice}</span><button aria-label="Dismiss notification" onClick={() => setNotice('')}><X size={15} /></button></div>}
+    {palette && <CommandPalette repo={repo} terminals={allTerminals} actions={paletteActions} onClose={() => setPalette(false)}
+      onNote={note => { setView('tasks'); setFocusRequest({ id: note.id, nonce: Date.now() }) }}
+      onTerminal={terminal => { setView('tasks'); openDrawer(terminal.id) }} />}
     {pendingLaunch && <LaunchModal repo={pendingLaunch.type === 'context' ? pendingLaunch.repo : pendingLaunch.context.repo} contextId={pendingLaunch.type === 'terminal' ? pendingLaunch.context.id : undefined} contextName={pendingLaunch.type === 'terminal' ? pendingLaunch.context.name : undefined} onCancel={() => setPendingLaunch(null)} onConfirm={request => { if (pendingLaunch.type === 'context') void newContext(request, pendingLaunch.repo); else void addTerminal(request, pendingLaunch.context) }} />}
   </div>
 }
