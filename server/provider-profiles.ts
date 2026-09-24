@@ -1,4 +1,4 @@
-import { accessSync, constants, statSync } from 'node:fs'
+import { accessSync, constants, existsSync, statSync } from 'node:fs'
 import { delimiter, isAbsolute, join } from 'node:path'
 import { homedir } from 'node:os'
 import type { TerminalKind, TerminalProfile } from '../src/types'
@@ -12,14 +12,28 @@ export const builtinAgents = {
 export type BuiltinAgent = keyof typeof builtinAgents
 export const isBuiltinAgent = (kind: TerminalKind): kind is BuiltinAgent => kind in builtinAgents
 
+/** Install locations a GUI-launched app's PATH usually misses. */
+const extraBinDirs = () => [join(homedir(), '.local', 'bin'), join(homedir(), '.npm-global', 'bin'), '/opt/homebrew/bin', '/usr/local/bin']
+
+/** Process environment for agent terminals, with common CLI install
+ *  directories appended to PATH. */
+export function agentEnvironment(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+  const path = [process.env.PATH, ...extraBinDirs(), '/usr/bin', '/bin'].filter(Boolean).join(delimiter)
+  return { ...process.env, PATH: path, ...extra }
+}
+
+/** Interactive login shell for plain command terminals. `$SHELL` wins; macOS/Linux fallbacks follow. */
+export function shellExecutable(): string {
+  const configured = process.env.SHELL
+  if (configured && existsSync(configured)) return configured
+  return ['/bin/zsh', '/bin/bash', '/bin/sh'].find(p => existsSync(p)) ?? '/bin/sh'
+}
+
 export function resolveExecutable(command: string): string | null {
   if (!command || command.includes('\0')) return null
   const paths = isAbsolute(command) ? [command] : [
     ...(process.env.PATH ?? '').split(delimiter).filter(Boolean).map(path => join(path, command)),
-    join(homedir(), '.local', 'bin', command),
-    join(homedir(), '.npm-global', 'bin', command),
-    join('/opt/homebrew/bin', command),
-    join('/usr/local/bin', command),
+    ...extraBinDirs().map(dir => join(dir, command)),
   ]
   for (const path of paths) {
     try { if (statSync(path).isFile()) { accessSync(path, constants.X_OK); return path } } catch { /* try another location */ }

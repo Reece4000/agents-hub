@@ -64,8 +64,7 @@ function WorkspaceApp() {
       setData(old => old ? { ...old, workspace: { ...old.workspace, contexts: old.workspace.contexts.map(context => {
         const terminals = context.terminals.map(item => item.id === resource.id ? resource : item)
         if (terminals.every((item, index) => item === context.terminals[index])) return context
-        const first = terminals[0]
-        return { ...context, terminals, terminalRunning: !!first?.terminalRunning, terminalKind: first?.terminalKind ?? context.terminalKind, launch: first?.launch ?? context.launch, draft: first?.draft ?? context.draft }
+        return { ...context, terminals }
       }) } } : old)
     })
     return () => { live = false; stopWorkspace(); stopResource?.() }
@@ -108,7 +107,7 @@ function WorkspaceApp() {
   const newContext = async (request: TerminalLaunchRequest, target: string) => {
     setBusy(true)
     try {
-      const context = await bridge.invoke<RepoContext>('newContext', { repo: target, name: request.contextName, terminalName: request.terminalName, terminalKind: request.terminalKind, launch: request.launch, profile: request.profile, providerModel: request.providerModel })
+      const context = await bridge.invoke<RepoContext>('newContext', { repo: target, name: request.contextName, terminalName: request.terminalName, terminalKind: request.terminalKind, profile: request.profile, providerModel: request.providerModel })
       setData(old => old ? { ...old, workspace: { ...old.workspace, repos: old.workspace.repos.includes(target) ? old.workspace.repos : [...old.workspace.repos, target], contexts: [...old.workspace.contexts.filter(item => item.id !== context.id), context], selectedRepo: target, selectedContexts: { ...old.workspace.selectedContexts, [target]: context.id } } } : old)
       setSelectedRepo(target); setActiveContextId(context.id); setView('terminals')
       if (context.terminals[0]) setActiveTerminals(current => ({ ...current, [context.id]: context.terminals[0].id }))
@@ -118,7 +117,7 @@ function WorkspaceApp() {
   const addTerminal = async (request: TerminalLaunchRequest, context: RepoContext) => {
     setBusy(true)
     try {
-      const terminal = await bridge.invoke<TerminalResource>('newTerminal', { contextId: context.id, terminalName: request.terminalName, terminalKind: request.terminalKind, launch: request.launch, profile: request.profile, providerModel: request.providerModel })
+      const terminal = await bridge.invoke<TerminalResource>('newTerminal', { contextId: context.id, terminalName: request.terminalName, terminalKind: request.terminalKind, profile: request.profile, providerModel: request.providerModel })
       setActiveTerminals(current => ({ ...current, [context.id]: terminal.id })); setView('terminals')
       setData(old => old ? { ...old, workspace: { ...old.workspace, contexts: old.workspace.contexts.map(item => item.id === context.id ? { ...item, terminals: [...item.terminals, terminal] } : item) } } : old)
     } catch (cause) { notify((cause as Error).message) }
@@ -241,13 +240,13 @@ function WorkspaceApp() {
             <button className="small-button add-terminal" disabled={busy} onClick={() => setPendingLaunch({ type: 'terminal', context: activeContext })}><Plus size={14} />Add terminal</button>
           </div>
           {renaming ? <div className="rename-context"><label>Session name<input autoFocus maxLength={60} value={renameInput} onChange={event => setRenameInput(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') void renameContext(); if (event.key === 'Escape') setRenaming(false) }} /></label><button className="small-button" onClick={() => setRenaming(false)}>Cancel</button><button className="small-button" onClick={() => void renameContext()}>Save name</button></div> : null}
-          {activeTerminal ? <div className="single-view"><TerminalView key={activeTerminal.id} session={activeTerminal} onError={notify} withComposer={activeTerminal.terminalKind === 'muse'} skills={data.skills} models={data.models} patch={patchTerminal} themeMode={themeMode} themeBackground={customBg} themeAccent={customAccent} /></div> : <div className="empty-workspace"><h2>No terminals in this Session</h2><button className="primary-button" onClick={() => setPendingLaunch({ type: 'terminal', context: activeContext })}><Plus size={15} />Add terminal</button></div>}
+          {activeTerminal ? <div className="single-view"><TerminalView key={activeTerminal.id} session={activeTerminal} onError={notify} patch={activeTerminal.terminalKind === 'shell' ? undefined : patchTerminal} themeMode={themeMode} themeBackground={customBg} themeAccent={customAccent} /></div> : <div className="empty-workspace"><h2>No terminals in this Session</h2><button className="primary-button" onClick={() => setPendingLaunch({ type: 'terminal', context: activeContext })}><Plus size={15} />Add terminal</button></div>}
         </> : <div className="empty-workspace"><h2>No Sessions in this workspace</h2><p>Create a Session to keep agents and shells together while you work.</p><button className="primary-button" disabled={busy || !repo} onClick={() => startContext(repo)}><Plus size={15} />Create a Session</button></div>}
       </section>}
     </main>
     {settings && <section ref={settingsPanel} className="settings-panel" aria-label="Settings"><header><h2>Workspace settings</h2><button className="icon-button" aria-label="Close settings" onClick={() => setSettings(false)}><X size={17} /></button></header><label>Appearance</label><div className="theme-options">{([['dark', Moon, 'Dark'], ['light', Sun, 'Light'], ['system', Monitor, 'System']] as const).map(([value, Icon, label]) => <button key={value} aria-pressed={data.workspace.theme === value} onClick={() => void bridge.invoke('preferences', { theme: value })}><Icon size={19} />{label}</button>)}</div><label className="theme-colour">Background<input type="color" aria-label="Custom background colour" value={customBg ?? DEFAULT_CANVAS[themeMode]} onChange={event => void bridge.invoke('preferences', { themeBackground: event.target.value })} /></label><label className="theme-colour">Accent<input type="color" aria-label="Custom accent colour" value={customAccent ?? DEFAULT_ACCENT[themeMode]} onChange={event => void bridge.invoke('preferences', { themeAccent: event.target.value })} /></label><p>Appearance applies to the workspace and terminal. Sessions and drafts save automatically.</p><small className="settings-version">Agent Hub 0.3.0</small></section>}
     {notice && <div className="toast" role="status"><span>{notice}</span><button aria-label="Dismiss notification" onClick={() => setNotice('')}><X size={15} /></button></div>}
-    {pendingLaunch && <LaunchModal models={data.models} repo={pendingLaunch.type === 'context' ? pendingLaunch.repo : pendingLaunch.context.repo} contextId={pendingLaunch.type === 'terminal' ? pendingLaunch.context.id : undefined} contextName={pendingLaunch.type === 'terminal' ? pendingLaunch.context.name : undefined} onCancel={() => setPendingLaunch(null)} onConfirm={request => { if (pendingLaunch.type === 'context') void newContext(request, pendingLaunch.repo); else void addTerminal(request, pendingLaunch.context) }} />}
+    {pendingLaunch && <LaunchModal repo={pendingLaunch.type === 'context' ? pendingLaunch.repo : pendingLaunch.context.repo} contextId={pendingLaunch.type === 'terminal' ? pendingLaunch.context.id : undefined} contextName={pendingLaunch.type === 'terminal' ? pendingLaunch.context.name : undefined} onCancel={() => setPendingLaunch(null)} onConfirm={request => { if (pendingLaunch.type === 'context') void newContext(request, pendingLaunch.repo); else void addTerminal(request, pendingLaunch.context) }} />}
   </div>
 }
 

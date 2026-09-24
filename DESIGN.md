@@ -1,6 +1,4 @@
-> September 5, 0.5 update: the canvas is removed; one TUI fills the workspace with the rich prompt docked below it in normal flow (model/effort panel floats above, never covering the screen). The sidebar groups recent sessions under each repository with a per-repo new-chat button. Keep functional copy ("New terminal", "No sessions in this repository").
->
-> September 5, 0.4 update: canvas nodes host real Muse TUIs only; the separate chat view was removed. Keep functional copy ("New terminal", "No sessions in this repository"). Each terminal has a rich prompt (multiline, images, model/effort) that sends via bracketed paste. See PRODUCT.md and docs/REGRESSIONS.md.
+> Current shape: the Tasks canvas holds notes, tasks, and codebase context; Sessions hold agent and shell terminals, one visible at a time. Agent terminals run any CLI (Codex, Claude Code, Cursor Agent, or a custom command) with a rich prompt docked below the screen that sends via bracketed paste. Keep functional copy ("New terminal", "No sessions in this repository"). See PRODUCT.md.
 
 ---
 name: Agent Hub
@@ -147,7 +145,7 @@ Source breakpoints at 1100px and 760px narrow the rail to 220px and 185px, reduc
 
 ## Elevation & Depth
 
-Tonal layering supplies most separation. Conversations use a soft node shadow; settings, skill suggestions, and toast surfaces use stronger popup shadows. Theme-dependent shadow colors keep light mode restrained. Thin borders and solid headers maintain panel boundaries during canvas movement.
+Tonal layering supplies most separation. Conversations use a soft node shadow; settings and toast surfaces use stronger popup shadows. Theme-dependent shadow colors keep light mode restrained. Thin borders and solid headers maintain panel boundaries during canvas movement.
 
 **The Solid Chrome Rule.** Headers and composer surfaces stay opaque so overlapping conversations retain a readable silhouette.
 
@@ -163,7 +161,7 @@ Primary actions use accent fill and accent ink, with the paired accent-hover sta
 
 ### Inputs and composer
 
-Ordinary fields use a bordered surface and compact padding. The rich composer has a solid chrome background that shifts to composer-focus when any child receives focus. Its editable area grows within a bounded scroll region. Attachment, model, and send controls occupy one lower row. Enter submits; Shift+Enter inserts a line break. Slash suggestions open above the composer, support arrow keys and selection, and consume Escape so dismissing suggestions does not also close focus view.
+Ordinary fields use a bordered surface and compact padding. The rich composer has a solid chrome background that shifts to composer-focus when any child receives focus. Its editable area grows within a bounded scroll region. Attachment and send controls occupy one lower row. Enter submits; Shift+Enter inserts a line break.
 
 ### Navigation
 
@@ -175,7 +173,7 @@ A solid header carries status, editable title, repository, and actions. Transcri
 
 ### Attachment chips and popups
 
-Attachment chips combine a thumbnail or file icon with a truncating filename and remove control. Skill suggestions use surface fill, popup elevation, and a selected row. Settings use the same surface and panel corners. The minimap can be toggled from canvas controls without covering content by default.
+Attachment chips combine a thumbnail or file icon with a truncating filename and remove control. Settings use the same surface and panel corners. The minimap can be toggled from canvas controls without covering content by default.
 
 ## Do's and Don'ts
 

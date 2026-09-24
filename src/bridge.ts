@@ -6,16 +6,13 @@ import { preferredOrganizerModel, type OrganizerConfig } from '../shared/organiz
 // Browser-only preview. The desktop always uses the isolated Electron preload bridge.
 function previewBridge(): Bridge {
   const board = previewBoard()
-  const workspaceKey = 'agent-hub-preview-v5'
+  const workspaceKey = 'agent-hub-preview-v6'
   const ticketKey = 'agent-hub-tickets-v2'
   const empty = { html: '', text: '', attachments: [] }
   const repo = '/Projects/agent-hub'
   const now = new Date().toISOString()
-  const resource = (id: string, contextId: string, root: string, name: string, agent = 'Muse', terminalKind: TerminalKind = 'muse'): TerminalResource => ({ id, contextId, repo: root, name, agent, terminalKind, ...(terminalKind === 'custom' ? { profile: { label: agent, executable: agent.toLowerCase().includes('claude') ? 'claude' : 'codex', args: [] } } : {}), draft: { ...empty }, createdAt: now, updatedAt: now })
-  const group = (id: string, name: string, root: string, terminals: TerminalResource[], createdAt = now, updatedAt = now): RepoContext => {
-    const first = terminals[0]
-    return { id, repo: root, name, terminals, terminalKind: first?.terminalKind ?? 'muse', launch: first?.launch ?? { model: '', reasoningEffort: '', approvalMode: 'on-request', permissionProfile: '', trustWorkspace: false, yolo: false }, draft: first?.draft ?? { ...empty }, terminalRunning: !!first?.terminalRunning, createdAt, updatedAt }
-  }
+  const resource = (id: string, contextId: string, root: string, name: string, agent = 'Shell', terminalKind: TerminalKind = 'shell'): TerminalResource => ({ id, contextId, repo: root, name, agent, terminalKind, ...(terminalKind === 'custom' ? { profile: { label: agent, executable: agent.toLowerCase().includes('claude') ? 'claude' : 'codex', args: [] } } : {}), draft: { ...empty }, createdAt: now, updatedAt: now })
+  const group = (id: string, name: string, root: string, terminals: TerminalResource[], createdAt = now, updatedAt = now): RepoContext => ({ id, repo: root, name, terminals, createdAt, updatedAt })
   const make = (id: string, name: string, root = repo): RepoContext => group(id, name, root, [resource(`${id}-terminal`, id, root, 'Shell', 'Shell', 'shell')])
   const initial: Workspace = { version: 2, repos: [repo, '/Projects/website'], selectedRepo: repo, selectedContexts: { [repo]: 'preview-1' }, theme: 'dark', viewports: {}, contexts: [
     group('preview-1', 'frontend', repo, [resource('preview-1-codex', 'preview-1', repo, 'Codex', 'Codex', 'custom'), resource('preview-1-shell', 'preview-1', repo, 'Shell', 'Shell', 'shell')]),
@@ -32,7 +29,7 @@ function previewBridge(): Bridge {
     { id: 'AH-70C39A4E', title: 'Launch a custom agent profile', status: 'in_progress', priority: 'urgent', description: 'Run any executable with a separately configured argument list.', acceptance: ['Command and arguments are entered separately'], agent: 'Codex', contextId: 'preview-1', contextName: 'frontend', createdAt: nowPast(80), updatedAt: nowPast(18) },
     { id: 'AH-274A13BE', title: 'Check the compact board layout', status: 'needs_testing', priority: 'normal', description: 'Keep every workflow lane reachable in a narrow window.', acceptance: ['The board scrolls horizontally without squeezing ticket titles'], agent: 'Gemini CLI', contextId: '', contextName: '', createdAt: nowPast(55), updatedAt: nowPast(5) },
     { id: 'AH-B320D9A5', title: 'Document ticket status handoff', status: 'blocked', priority: 'low', description: 'Add agent-facing instructions next to ticket files.', acceptance: [], agent: '', contextId: '', contextName: '', createdAt: nowPast(30), updatedAt: nowPast(30) },
-    { id: 'AH-92D4EE7A', title: 'Keep provider options independent', status: 'completed', priority: 'normal', description: 'Retain existing integrations alongside generic CLI agents.', acceptance: ['More than one terminal profile can be used in a context'], agent: 'Muse', contextId: 'preview-1', contextName: 'frontend', createdAt: nowPast(20), updatedAt: nowPast(2) },
+    { id: 'AH-92D4EE7A', title: 'Keep provider options independent', status: 'completed', priority: 'normal', description: 'Retain existing integrations alongside generic CLI agents.', acceptance: ['More than one terminal profile can be used in a context'], agent: 'Codex', contextId: 'preview-1', contextName: 'frontend', createdAt: nowPast(20), updatedAt: nowPast(2) },
   ]
   let ticketsByRepo: Record<string, Ticket[]> = JSON.parse(localStorage.getItem(ticketKey) || 'null') || { [repo]: sampleTickets }
   const listeners = new Set<(s: Workspace) => void>()
@@ -42,14 +39,12 @@ function previewBridge(): Bridge {
     localStorage.setItem(ticketKey, JSON.stringify(ticketsByRepo))
     ticketListeners.forEach(l => l({ repo: root, tickets: structuredClone(ticketsByRepo[root] ?? []) }))
   }
-  const skills = [{ id: 'review', name: 'review', description: 'Review changes in this folder' }, { id: 'debug', name: 'debug', description: 'Investigate a reproducible problem' }]
   const findTerminal = (id: string) => state.contexts.flatMap(c => c.terminals).find(t => t.id === id)
   const makeTerminal = (id: string, contextId: string, root: string, args: Record<string, any>) => {
-    const kind = ['muse', 'codex', 'claude', 'cursor', 'shell', 'custom'].includes(args.terminalKind) ? args.terminalKind as TerminalKind : 'muse'
-    const agent = ({ muse: 'Muse', codex: 'Codex', claude: 'Claude Code', cursor: 'Cursor Agent', shell: 'Shell', custom: String(args.profile?.label || 'Agent') } as Record<TerminalKind, string>)[kind]
+    const kind = ['codex', 'claude', 'cursor', 'shell', 'custom'].includes(args.terminalKind) ? args.terminalKind as TerminalKind : 'shell'
+    const agent = ({ codex: 'Codex', claude: 'Claude Code', cursor: 'Cursor Agent', shell: 'Shell', custom: String(args.profile?.label || 'Agent') } as Record<TerminalKind, string>)[kind]
     const terminalName = String(args.terminalName || agent).trim().slice(0, 60) || agent
     const result = resource(id, contextId, root, terminalName, agent, kind)
-    if (kind === 'muse' && args.launch && typeof args.launch === 'object') result.launch = args.launch
     if (kind === 'custom') result.profile = args.profile && typeof args.profile === 'object' ? args.profile : { label: agent, executable: String(args.executable || 'codex'), args: Array.isArray(args.args) ? args.args.filter((v: unknown) => typeof v === 'string') : [] }
     if (['codex', 'claude', 'cursor'].includes(kind)) result.profile = { label: agent, executable: ({ codex: 'codex', claude: 'claude', cursor: 'cursor-agent' } as Record<string, string>)[kind], args: args.providerModel ? ['--model', String(args.providerModel)] : [] }
     return result
@@ -63,7 +58,7 @@ function previewBridge(): Bridge {
       const activeContext = state.contexts.find(c => c.id === args.id || c.id === args.contextId)
       let result: any = null
       switch (action) {
-        case 'bootstrap': return { workspace: structuredClone(state), skills, models: [], host: 'Browser preview' } as T
+        case 'bootstrap': return { workspace: structuredClone(state) } as T
         case 'terminalProviders': return [{ kind: 'codex', label: 'Codex', executable: '/usr/local/bin/codex' }, { kind: 'claude', label: 'Claude Code', executable: '/usr/local/bin/claude' }, { kind: 'cursor', label: 'Cursor Agent', executable: '/usr/local/bin/cursor-agent' }] as T
         case 'listDir': {
           const home = '/Projects'

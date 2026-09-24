@@ -3,9 +3,9 @@ import { join, basename } from 'node:path'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { homedir } from 'node:os'
-import { MuseService } from '../server/service'
+import { HubService } from '../server/service'
 
-let service: MuseService
+let service: HubService
 let window: BrowserWindow | undefined
 const development = !app.isPackaged
 const root = process.env.AGENT_HUB_PROJECT_ROOT || (app.isPackaged ? homedir() : process.cwd())
@@ -19,7 +19,7 @@ else {
     // items. Without it, the default menu repeatedly logs
     // "representedObject is not a WeakPtrToElectronMenuModelAsNSObject".
     Menu.setApplicationMenu(Menu.buildFromTemplate([{ role: 'appMenu' }, { role: 'editMenu' }, { role: 'windowMenu' }]))
-    service = new MuseService(process.env.AGENT_HUB_DATA_DIR || (development ? join(root, '.agent-hub') : join(app.getPath('userData'), 'workspace')), root, undefined, join(__dirname, 'board-cli.cjs'))
+    service = new HubService(process.env.AGENT_HUB_DATA_DIR || (development ? join(root, '.agent-hub') : join(app.getPath('userData'), 'workspace')), root, join(__dirname, 'board-cli.cjs'))
     const create = () => {
       window = new BrowserWindow({ width: 1512, height: 980, minWidth: 860, minHeight: 600, title: 'Agent Hub', backgroundColor: '#17191c', titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 18, y: 19 }, webPreferences: { preload: join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true } })
       window.webContents.setWindowOpenHandler(({ url }) => { if (/^https?:\/\//.test(url)) void shell.openExternal(url); return { action: 'deny' } })

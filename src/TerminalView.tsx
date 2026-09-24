@@ -7,7 +7,7 @@ import { macShortcutToInput } from './terminalKeys'
 import { buildXtermTheme } from './theme'
 import type { ThemeMode } from './theme'
 import TerminalComposer, { getTerminalDraft } from './TerminalComposer'
-import type { TerminalResource, Skill, Attachment } from './types'
+import type { TerminalResource, Attachment } from './types'
 
 type Cached = { terminal: Terminal; fit: FitAddon; ready: boolean; seq:number; queue: {data:string;seq:number}[]; stop:()=>void }
 const terminals = new Map<string,Cached>()
@@ -15,7 +15,9 @@ const openTimeout = <T,>(promise: Promise<T>): Promise<T> => new Promise((resolv
   const timer = setTimeout(() => reject(new Error('Terminal open timed out. Try starting the terminal again.')), 20000)
   promise.then(value => { clearTimeout(timer); resolve(value) }, error => { clearTimeout(timer); reject(error) })
 })
-export default function TerminalView({session,onError,withComposer,skills,models,patch,themeMode,themeBackground,themeAccent}:{session:TerminalResource;onError:(message:string)=>void;withComposer?:boolean;skills?:Skill[];models?:{modelId:string;displayLabel:string}[];patch?:(id:string,changes:Partial<TerminalResource>)=>Promise<unknown>;themeMode?:ThemeMode;themeBackground?:string;themeAccent?:string}) {
+/** A live terminal. Passing `patch` docks the rich prompt below it; files
+ *  pasted or dropped on the screen then join that prompt's draft. */
+export default function TerminalView({session,onError,patch,themeMode,themeBackground,themeAccent}:{session:TerminalResource;onError:(message:string)=>void;patch?:(id:string,changes:Partial<TerminalResource>)=>Promise<unknown>;themeMode?:ThemeMode;themeBackground?:string;themeAccent?:string}) {
   const container=useRef<HTMLDivElement>(null)
   const wrap=useRef<HTMLDivElement>(null)
   const [busy,setBusy]=useState(false)
@@ -106,9 +108,9 @@ export default function TerminalView({session,onError,withComposer,skills,models
       await patch(session.id, { draft: { ...current, attachments: [...current.attachments, ...saved] } })
     } catch (e) { setError((e as Error).message); onError((e as Error).message) }
   }
-  // Cmd+V parity with the TUI's Ctrl+V image paste: files dropped or pasted over the
-  // terminal land in the rich prompt draft (visible thumbnails) instead of being lost
-  // to the browser. Plain-text paste falls through to xterm untouched.
+  // Files dropped or pasted over the terminal land in the rich prompt draft
+  // (visible thumbnails) instead of being lost to the browser. Without a
+  // prompt, everything falls through to xterm untouched.
   const onPaste = (e: React.ClipboardEvent) => {
     const files = Array.from(e.clipboardData?.files ?? [])
     if (files.length && patch) { e.preventDefault(); e.stopPropagation(); void saveFiles(files); return }
@@ -132,6 +134,6 @@ export default function TerminalView({session,onError,withComposer,skills,models
     {!running && terminals.has(session.id) && <div className="terminal-footer"><span>Terminal closed</span><button className="small-button" disabled={busy} onClick={()=>void open()}>Reopen terminal</button></div>}
     {error && <div className="inline-error">{error}</div>}
   </div>
-  {withComposer && skills && models && patch && <TerminalComposer key={`prompt-${session.id}`} session={session} skills={skills} models={models} patch={patch} onError={onError} />}
+  {patch && <TerminalComposer key={`prompt-${session.id}`} session={session} patch={patch} onError={onError} />}
   </div>
 }

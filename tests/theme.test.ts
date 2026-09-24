@@ -1,6 +1,5 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { EventEmitter } from 'node:events'
 import { mkdtempSync, rmSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -8,8 +7,8 @@ import {
   normalizeThemeColor, mixHex, luminanceHex, customThemeVars, applyThemeVars,
   buildXtermTheme, themeEnvironment, MANAGED_THEME_KEYS,
 } from '../src/theme'
-import { MuseService } from '../server/service'
-import type { MspClient } from '../server/msp'
+import { HubService } from '../server/service'
+import type { OpenSpec } from '../server/terminals'
 
 test('theme colours normalize to lowercase six-digit hex', () => {
   assert.equal(normalizeThemeColor('#ABC'), '#aabbcc')
@@ -106,8 +105,7 @@ test('themeEnvironment forwards only valid custom colours', () => {
 
 test('preferences store, normalize, ignore and clear custom colours', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'agent-hub-theme-'))
-  const host = Object.assign(new EventEmitter(), { stop() {} }) as MspClient
-  const service = new MuseService(dir, dir, host)
+  const service = new HubService(dir, dir)
   try {
     let broadcasts = 0
     service.on('workspace', () => { broadcasts++ })
@@ -131,8 +129,7 @@ test('preferences store, normalize, ignore and clear custom colours', async () =
 
 test('switching appearance presets clears a custom background but keeps the accent', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'agent-hub-theme-preset-'))
-  const host = Object.assign(new EventEmitter(), { stop() {} }) as MspClient
-  const service = new MuseService(dir, dir, host)
+  const service = new HubService(dir, dir)
   try {
     await service.invoke('preferences', { themeBackground: '#20242a', themeAccent: '#7c5cff' })
     await service.invoke('preferences', { theme: 'light' })
@@ -152,16 +149,13 @@ test('switching appearance presets clears a custom background but keeps the acce
 
 test('custom theme colours reach the spawned PTY environment', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'agent-hub-theme-pty-'))
-  const host = Object.assign(new EventEmitter(), { stop() {} }) as MspClient
-  const service = new MuseService(dir, dir, host)
-  const original = service.terminals.open.bind(service.terminals)
-  let opened: unknown[] = []
-  service.terminals.open = (async (...args: unknown[]) => { opened = args; return { data: '', seq: 0, cols: 90, rows: 28, running: true } }) as typeof original
+  const service = new HubService(dir, dir)
+  let extraEnv: Record<string, string> = {}
+  service.terminals.open = (async (_id: string, _repo: string, spec: OpenSpec) => { extraEnv = spec.env ?? {}; return { data: '', seq: 0, cols: 90, rows: 28, running: true } }) as typeof service.terminals.open
   try {
     await service.invoke('preferences', { themeBackground: '#20242a', themeAccent: '#7c5cff' })
-    const session = await service.invoke('newContext', { repo: dir, name: 'frontend', launch: {} })
+    const session = await service.invoke('newContext', { repo: dir, name: 'frontend' })
     await service.invoke('terminalOpen', { id: session.id })
-    const extraEnv = opened[7] as Record<string, string>
     assert.equal(extraEnv.AGENT_HUB_THEME_BACKGROUND, '#20242a')
     assert.equal(extraEnv.AGENT_HUB_THEME_ACCENT, '#7c5cff')
   } finally { service.close(); rmSync(dir, { recursive: true, force: true }) }

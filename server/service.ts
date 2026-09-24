@@ -1,31 +1,26 @@
 import { EventEmitter } from 'node:events'
-import { execFile } from 'node:child_process'
-import { promisify } from 'node:util'
 import { mkdirSync, readFileSync, writeFileSync, statSync, readdirSync } from 'node:fs'
-import { join, basename, isAbsolute, normalize } from 'node:path'
+import { join, basename, extname, isAbsolute, normalize } from 'node:path'
 import { homedir } from 'node:os'
 import { v7 as uuid } from 'uuid'
 import { Store, newContext, emptyDraft, liveContext, liveResource, liveWorkspace } from './store'
-import { MspClient, museExecutable, museEnvironment } from './msp'
 import { Terminals } from './terminals'
-import { normalizeLaunch } from './launch'
 import { availableAgents, customProfile, isBuiltinAgent, nativeProfile } from './provider-profiles'
 import { DictationService } from './dictation'
 import { BoardOrganizer } from './board-organizer'
 import { TicketStore } from './tickets'
 import { BoardStore } from './board-store'
 import type { BoardCommand, BoardNote, BoardQuery } from '../shared/board'
-import type { Attachment, Bootstrap, RepoContext, Skill, Workspace, TerminalKind, TerminalProfile, TerminalResource, Ticket } from '../src/types'
+import type { Attachment, Bootstrap, RepoContext, TerminalKind, TerminalProfile, TerminalResource, Ticket } from '../src/types'
 import { normalizeThemeColor, themeEnvironment } from '../src/theme'
-import type { ModelListResult } from './generated/msp'
-const execute = promisify(execFile)
+
+const MIME_EXTENSIONS: Record<string, string> = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/webp': '.webp', 'image/gif': '.gif', 'application/pdf': '.pdf', 'text/plain': '.txt' }
 
 /** Agent Hub stores repo-local tickets, named terminal contexts, and terminal
  *  resources. Provider-specific controls stay optional; every agent can run as
  *  a normal executable in a supervised PTY. */
-export class MuseService extends EventEmitter {
+export class HubService extends EventEmitter {
   store: Store
-  host: MspClient
   terminals = new Terminals()
   ticketStore = new TicketStore()
   boardStore = new BoardStore()
@@ -35,39 +30,21 @@ export class MuseService extends EventEmitter {
   private pendingResources = new Set<string>()
   private opens = new Map<string, Promise<{ data: string; seq: number; cols: number; rows: number; running: boolean }>>()
   private flushTimer?: NodeJS.Timeout
-  private skills: Skill[] = []
-  private models: Bootstrap['models'] = []
-  private connection = 'Local workspace'
-  constructor(directory: string, initialRepo = process.cwd(), host = new MspClient(), private boardCliPath = '') {
-    super(); this.store = new Store(directory, initialRepo); this.host = host
+  constructor(directory: string, initialRepo = process.cwd(), private boardCliPath = '') {
+    super(); this.store = new Store(directory, initialRepo)
     this.ticketStore.on('change', snapshot => this.emit('tickets', snapshot))
     this.boardStore.on('change', snapshot => this.emit('board', snapshot))
-    host.on('disconnected', () => {
-      if (host === this.host) this.connection = 'Disconnected'
-      this.changed()
-    })
     this.terminals.on('data', event => {
       this.emit('terminal', event)
     })
     this.terminals.on('exit', event => {
       this.emit('terminal', event)
-      let owner: RepoContext | undefined
       try {
         const resource = this.store.resource(event.id)
         resource.terminalRunning = false
-        owner = this.store.state.contexts.find(c => c.id === resource.contextId)
-        if (owner) this.syncContextProjection(owner)
       } catch { return }
       this.changed(event.id)
     })
-  }
-  private syncContextProjection(context: RepoContext) {
-    const first = context.terminals[0]
-    if (!first) return
-    context.terminalKind = first.terminalKind
-    context.launch = first.launch ?? normalizeLaunch({})
-    context.draft = first.draft
-    context.terminalRunning = !!first.terminalRunning
   }
   private changed(id?: string) {
     if (id) this.pendingResources.add(id)
@@ -80,24 +57,12 @@ export class MuseService extends EventEmitter {
     }, 150)
   }
   flush() {
-    this.store.state.connection = this.connection
     this.store.save()
     this.emit('workspace', liveWorkspace(this.store.state))
   }
-  private async ready() { const info = await this.host.start(); this.connection = `Muse ${info.serverInfo.version}` }
-  async bootstrap(): Promise<Bootstrap> {
-    try { await this.ready() }
-    catch { this.connection = 'Local workspace' }
-    if (this.connection.startsWith('Muse ')) {
-      const results = await Promise.allSettled([
-        this.host.request<ModelListResult>('model/list'),
-        execute(museExecutable(), ['skills', 'list', '--json'], { env: museEnvironment(), timeout: 15000, maxBuffer: 5 * 1024 * 1024 })
-      ])
-      if (results[0].status === 'fulfilled') this.models = results[0].value.models
-      if (results[1].status === 'fulfilled') this.skills = JSON.parse(results[1].value.stdout).skills.map((s: any) => ({ id: s.id, name: s.name ?? s.id, description: s.description ?? s.short_description ?? '' }))
-    }
+  bootstrap(): Bootstrap {
     this.flush()
-    return { workspace: liveWorkspace(this.store.state), skills: this.skills, models: this.models, host: this.connection }
+    return { workspace: liveWorkspace(this.store.state) }
   }
   /** Store a custom theme colour. Null/empty clears it back to the per-mode
    *  default; an invalid value is ignored. Returns whether state changed. */
@@ -138,10 +103,10 @@ export class MuseService extends EventEmitter {
     return `You are working in Agent Hub for ${repo}. The Tasks canvas is shared repository memory, stored in .agents-hub/notes/*.md; .agents-hub/canvas.json stores positions and sections. Read .agents-hub/README.md first.\n\nStart by reviewing the board and relevant notes. In this terminal run ELECTRON_RUN_AS_NODE=1 "$AGENT_HUB_BOARD_RUNTIME" "$AGENT_HUB_BOARD_CLI" summary, then search '{"kind":"context"}' and read relevant Task and Context notes. If those tools are unavailable, read the Markdown files directly.\n\n${active ? `Active Task: ${active.id} ${active.title}. Read .agents-hub/notes/${active.id}.md and keep its status current.\n\n` : ''}Recent codebase context:\n${context.length ? context.map(note => `- ${note.id} ${note.title}: ${note.body.slice(0, 180)}`).join('\n') : '- None yet.'}\n\nUse the board as context while coding. At the end of a Task, update its outcome and acceptance checks and record one concise codebase learning with evidence paths in a Context note. Use the board CLI or MCP complete-task tool when available.`
   }
   private terminalResource(contextId: string, repo: string, args: Record<string, any>): TerminalResource {
-    const kind: TerminalKind = ['shell', 'custom', 'codex', 'claude', 'cursor'].includes(args.terminalKind) ? args.terminalKind : 'muse'
+    const kind: TerminalKind = ['shell', 'custom', 'codex', 'claude', 'cursor'].includes(args.terminalKind) ? args.terminalKind : 'shell'
     const now = new Date().toISOString()
     let profile: TerminalProfile | undefined
-    let agent = kind === 'muse' ? 'Muse' : kind === 'shell' ? 'Shell' : 'Agent'
+    let agent = kind === 'shell' ? 'Shell' : 'Agent'
     if (isBuiltinAgent(kind)) {
       profile = nativeProfile(kind, args.providerModel)
       agent = profile.label
@@ -156,7 +121,7 @@ export class MuseService extends EventEmitter {
     const requestedName = typeof args.terminalName === 'string' ? args.terminalName.trim().slice(0, 60) : ''
     return {
       id: `res-${uuid()}`, contextId, repo, name: requestedName || agent, agent, terminalKind: kind, profile,
-      launch: normalizeLaunch(args.launch), draft: emptyDraft(), terminalRunning: false, createdAt: now, updatedAt: now,
+      draft: emptyDraft(), terminalRunning: false, createdAt: now, updatedAt: now,
     }
   }
   private contextForResource(id: string) { return this.store.state.contexts.find(context => context.terminals.some(resource => resource.id === id)) }
@@ -204,7 +169,7 @@ export class MuseService extends EventEmitter {
         const context = this.store.context(String(args.contextId))
         const resource = this.terminalResource(context.id, context.repo, args)
         context.terminals.push(resource); context.updatedAt = new Date().toISOString()
-        this.syncContextProjection(context); this.flush(); return resource
+        this.flush(); return resource
       }
       case 'deleteContext': {
         const id = String(args.id)
@@ -226,7 +191,7 @@ export class MuseService extends EventEmitter {
         if (context.terminals.length <= 1) throw new Error('A Session must keep at least one terminal. Add another terminal before removing this one.')
         this.terminals.stop(resource.id).catch(() => {})
         context.terminals = context.terminals.filter(item => item.id !== resource.id)
-        context.updatedAt = new Date().toISOString(); this.syncContextProjection(context); this.flush(); return null
+        context.updatedAt = new Date().toISOString(); this.flush(); return null
       }
       case 'terminalOpen': {
         const resource = this.store.resource(String(args.id))
@@ -239,10 +204,10 @@ export class MuseService extends EventEmitter {
           catch { /* a damaged board should not prevent opening a terminal */ }
           const activeTask = tasks.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0]
           const boardEnv = { ...themeEnv, AGENT_HUB_REPO: resource.repo, AGENT_HUB_BOARD_RUNTIME: process.execPath, ...(this.boardCliPath ? { AGENT_HUB_BOARD_CLI: this.boardCliPath } : {}), ...(activeTask ? { AGENT_HUB_ACTIVE_TASK_ID: activeTask.id } : {}) }
-          const snapshot = await this.terminals.open(resource.id, null, resource.repo, args.cols, args.rows, resource.launch, resource.terminalKind, boardEnv, resource.profile)
+          const snapshot = await this.terminals.open(resource.id, resource.repo, { kind: resource.terminalKind, profile: resource.profile, env: boardEnv, cols: args.cols, rows: args.rows })
           resource.terminalRunning = snapshot.running
           resource.updatedAt = new Date().toISOString(); context.updatedAt = resource.updatedAt
-          this.syncContextProjection(context); this.flush()
+          this.flush()
           if (!snapshot.running) {
             const tail = this.terminals.screenText(resource.id).replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '').trim().slice(-400)
             throw new Error(`${resource.agent} exited before the terminal attached.${tail ? ` Output: ${tail}` : ''}`)
@@ -259,32 +224,11 @@ export class MuseService extends EventEmitter {
       case 'patchContext': {
         const context = this.store.context(String(args.id)), patch = args.patch ?? {}
         if (typeof patch.name === 'string' && patch.name.trim()) context.name = patch.name.trim().slice(0, 60)
-        // Read/write the first-resource projection for older clients while the
-        // renderer uses patchTerminal for resource-owned fields.
-        const first = context.terminals[0]
-        if (first && patch.launch && typeof patch.launch === 'object') {
-          if (this.terminals.running(first.id)) throw new Error('Stop the terminal before changing Muse model and effort. They apply on next open.')
-          first.launch = normalizeLaunch({ ...first.launch, ...patch.launch })
-        }
-        if (first && patch.draft && typeof patch.draft.html === 'string' && typeof patch.draft.text === 'string' && Array.isArray(patch.draft.attachments)) {
-          if (patch.draft.html.length > 1_000_000) throw new Error('This draft is too large.')
-          for (const attachment of patch.draft.attachments) this.attachmentPath(attachment.id)
-          first.draft = { ...patch.draft, attachments: patch.draft.attachments.map(({ preview, path, ...metadata }: Attachment) => metadata) }
-        }
-        this.syncContextProjection(context)
-        if (Object.keys(patch).every(k => k === 'draft')) {
-          clearTimeout(this.draftTimer); this.draftTimer = setTimeout(() => this.store.save(), 500)
-          return null
-        }
         context.updatedAt = new Date().toISOString()
         this.flush(); return liveContext(context)
       }
       case 'patchTerminal': {
         const resource = this.store.resource(String(args.id)), context = this.store.context(resource.contextId), patch = args.patch ?? {}
-        if (patch.launch && typeof patch.launch === 'object') {
-          if (this.terminals.running(resource.id)) throw new Error('Stop the terminal before changing Muse model and effort. They apply on next open.')
-          resource.launch = normalizeLaunch({ ...resource.launch, ...patch.launch })
-        }
         if (patch.name !== undefined && typeof patch.name === 'string' && patch.name.trim()) resource.name = patch.name.trim().slice(0, 60)
         if (patch.draft && typeof patch.draft.html === 'string' && typeof patch.draft.text === 'string' && Array.isArray(patch.draft.attachments)) {
           if (patch.draft.html.length > 1_000_000) throw new Error('This draft is too large.')
@@ -292,7 +236,6 @@ export class MuseService extends EventEmitter {
           resource.draft = { ...patch.draft, attachments: patch.draft.attachments.map(({ preview, path, ...metadata }: Attachment) => metadata) }
         }
         resource.updatedAt = new Date().toISOString(); context.updatedAt = resource.updatedAt
-        this.syncContextProjection(context)
         if (Object.keys(patch).every(k => k === 'draft')) {
           clearTimeout(this.draftTimer); this.draftTimer = setTimeout(() => this.store.save(), 500)
           return null
@@ -365,34 +308,26 @@ export class MuseService extends EventEmitter {
         if (!attachment) throw new Error('This attachment is no longer in the draft.')
         return this.attachmentPath(attachment.id)
       }
-      case 'newSession':
-      case 'patchSession':
-      case 'read':
-      case 'leaveChat':
-        throw new Error('Provider sessions are managed inside their terminal. Agent Hub stores workspace tickets and terminal resources.')
-      case 'send':
-      case 'interrupt':
-      case 'setModel':
-      case 'approval':
-      case 'answer':
-      case 'fork':
-        throw new Error('Structured chat actions are not available for generic CLI agents.')
       default: throw new Error(`Unknown action: ${action}`)
     }
   }
+  /** Attachment ids are a uuid plus the original extension, so the saved
+   *  path reads as an image or document to agent CLIs that receive it. */
   private attachmentPath(id: unknown) {
-    if (typeof id !== 'string' || !/^[a-f0-9-]{36}$/.test(id)) throw new Error('Invalid attachment.')
+    if (typeof id !== 'string' || !/^[a-f0-9-]{36}(\.[a-z0-9]{1,10})?$/.test(id)) throw new Error('Invalid attachment.')
     return join(this.store.directory, 'attachments', id)
   }
   saveAttachment(args: Record<string, any>): Attachment {
     if (typeof args.base64 !== 'string' || args.base64.length > 28_000_000) throw new Error('Attachments must be smaller than 20 MB.')
     const data = Buffer.from(args.base64, 'base64')
     if (!data.length || data.length > 20 * 1024 * 1024) throw new Error('This attachment is empty or larger than 20 MB.')
-    const id = uuid(), name = basename(String(args.name || 'attachment'))
+    const name = basename(String(args.name || 'attachment'))
     const mime = String(args.mime || 'application/octet-stream')
+    const extension = (extname(name).toLowerCase().match(/^\.[a-z0-9]{1,10}$/)?.[0]) ?? MIME_EXTENSIONS[mime] ?? ''
+    const id = `${uuid()}${extension}`
     mkdirSync(join(this.store.directory, 'attachments'), { recursive: true })
     writeFileSync(this.attachmentPath(id), data, { mode: 0o600 })
     return { id, name, mime, size: data.length, path: this.attachmentPath(id), ...(/^image\/(png|jpeg|webp|gif)$/.test(mime) ? { preview: `data:${mime};base64,${args.base64}` } : {}) }
   }
-  close() { clearTimeout(this.flushTimer); clearTimeout(this.draftTimer); this.ticketStore.close(); this.boardStore.close(); this.dictation.close(); this.flush(); this.terminals.close(); this.host.stop() }
+  close() { clearTimeout(this.flushTimer); clearTimeout(this.draftTimer); this.ticketStore.close(); this.boardStore.close(); this.dictation.close(); this.flush(); this.terminals.close() }
 }
