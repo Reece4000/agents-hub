@@ -128,6 +128,8 @@ function previewBridge(): Bridge {
         case 'board:apply': return board.apply(String(args.repo || state.selectedRepo), args.command) as T
         case 'board:answer': return { note: board.apply(String(args.repo || state.selectedRepo), { type: 'answerQuestion', id: String(args.id), answer: String(args.answer) }), delivery: 'none' } as T
         case 'terminal:deliver': return 'queued' as T
+        case 'board:worktree:status': return {} as T
+        case 'board:fanout': case 'board:worktree:remove': throw new Error('Worktrees and agents run in the desktop app.')
         case 'board:freshness': return { 'AH-274A13BE': { stale: true, reasons: ['server/service.ts changed after this was verified'], verifiedAt: now } } as T
         case 'board:dispatch': {
           const root = String(args.repo || state.selectedRepo), terminal = findTerminal(String(args.terminalId))

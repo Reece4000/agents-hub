@@ -11,6 +11,8 @@ export interface UserSource { title: string; body: string }
 export interface ProgressEntry { at: string; actor: string; text: string }
 /** A question an agent asked the person about a Task. Answering it on the
  *  canvas delivers the answer to `terminalId` when that terminal is idle. */
+/** A git worktree and branch where an agent works on one Task in parallel. */
+export interface TaskWorktree { path: string; branch: string; base: string }
 export interface TaskQuestion { text: string; options?: string[]; askedBy: string; askedAt: string; terminalId?: string }
 export interface BoardNote {
   id: string
@@ -41,6 +43,7 @@ export interface BoardNote {
   parentId?: string
   log?: ProgressEntry[]
   question?: TaskQuestion
+  worktree?: TaskWorktree
 }
 export interface BoardSection { id: string; title: string; x: number; y: number; width: number; height: number; collapsed: boolean }
 export interface BoardPosition { x: number; y: number }

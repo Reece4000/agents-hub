@@ -228,3 +228,27 @@ button.kb-card-live:hover{filter:brightness(1.12)}
 .kb-card-open,.kb-card-top{user-select:none;-webkit-user-select:none}
 .kb-selection button,.kb-selection .kb-pack-handle{white-space:nowrap}
 .kb-selection{max-width:calc(100% - 24px)}
+
+/* Fan-out: subtasks, worktrees, and branch chips. */
+.kb-card-branch{display:flex;align-items:center;gap:5px;margin:0 12px 4px;font-size:9.5px;color:var(--secondary);min-width:0}
+.kb-card-branch span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.kb-card-branch small{margin-left:auto;flex-shrink:0;color:var(--muted)}
+.plus{color:var(--accent);font-weight:600}.minus{color:var(--error);font-weight:600}
+.kb-subtasks,.kb-worktree{margin:12px 0;display:flex;flex-direction:column;gap:6px}
+.kb-subtasks>div:first-child{display:flex;justify-content:space-between;color:var(--muted);font-size:10px}
+.kb-subtask{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:7px;border:1px solid var(--border);background:var(--surface);color:var(--text);font-size:11px;text-align:left;min-width:0}
+.kb-subtask span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.kb-subtask small{display:flex;align-items:center;gap:3px;color:var(--muted);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:9.5px}
+.kb-subtask-actions{display:flex;gap:8px;align-items:center}
+.kb-subtask-actions select{flex:1;min-width:0;font-size:11px;padding:5px 6px;border-radius:6px;border:1px solid var(--border);background:var(--button);color:var(--text)}
+.kb-worktree{padding:10px;border:1px solid var(--border);border-radius:9px;background:var(--code)}
+.kb-worktree-head{display:flex;align-items:center;gap:7px;font-size:11px;flex-wrap:wrap}
+.kb-worktree-head strong{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600}
+.kb-worktree-head span{color:var(--muted);margin-left:auto}
+.kb-worktree code{font-size:10px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.kb-worktree-actions{display:flex;gap:6px;flex-wrap:wrap}
+.kb-worktree-actions button{padding:5px 9px;border-radius:6px;border:1px solid var(--border);background:var(--surface);color:var(--text);font-size:11px}
+.kb-worktree-actions button.danger{border-color:var(--error);color:var(--error)}
+.kb-agents{transition:opacity .18s ease,transform .18s ease}
+.kb-agents.receded{opacity:.22;transform:translateY(10px)}
+.kb-agents.receded:hover,.kb-agents.receded:focus-within{opacity:1;transform:none}

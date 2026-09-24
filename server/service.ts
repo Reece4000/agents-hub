@@ -10,6 +10,7 @@ import { launchPlan, providerFor, writeBoardShim } from './agent-integration'
 import { ActivityTracker } from './agent-activity'
 import { AgentEventServer } from './agent-events'
 import { contextFreshness } from './freshness'
+import { assertWorktreePath, createWorktree, removeWorktree, worktreeStatus } from './worktrees'
 import { DictationService } from './dictation'
 import { BoardOrganizer } from './board-organizer'
 import { TicketStore } from './tickets'
@@ -175,7 +176,7 @@ export class HubService extends EventEmitter {
     const summary = this.boardStore.query(repo, { type: 'summary' }) as { total: number; byKind: Record<string, number> }
     const context = related.filter(note => note.kind === 'context').slice(0, 6)
     const recentContext = (this.boardStore.query(repo, { type: 'search', kind: 'context', limit: 200 }) as BoardNote[]).filter(note => !context.some(linked => linked.id === note.id)).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 6)
-    return `Work on Agent Hub task ${task.id}: ${task.title}\n\n${task.body || 'Read the task note for its full brief.'}\n\nAcceptance checks:\n${task.acceptance?.length ? task.acceptance.map(item => `- ${item}`).join('\n') : '- Define and verify a concrete outcome.'}\n\nImages to inspect:\n${task.images?.length ? task.images.map(image => `- ${join(repo, image.path)}${image.description ? ` — ${image.description}` : ''}`).join('\n') : '- None attached.'}\n\nThe Tasks canvas is the repository's shared context (${summary.total} notes, ${summary.byKind.context ?? 0} codebase context notes). Read .agents-hub/README.md and .agents-hub/notes/${task.id}.md. Query the board for other relevant tasks, notes, and context before changing code. Linked context:\n${context.length ? context.map(note => `- ${note.id} ${note.title}: ${note.body.slice(0, 280)}`).join('\n') : '- None linked.'}\n\nOther codebase context to check:\n${recentContext.length ? recentContext.map(note => `- ${note.id} ${note.title}`).join('\n') : '- None.'}\n\nBoard tools: use the board_* MCP tools, or run agent-hub-board summary (then search '{"kind":"context"}', read '"${task.id}"'). Without either, read the note files directly. Log meaningful steps with board_log_progress (agent-hub-board log \"...\") so progress shows on the canvas; if you need a decision, ask with board_ask and end your turn, and the answer will be typed here. After coding, complete the Task with board_complete_task (agent-hub-board complete-task): give the outcome, checked acceptance criteria, and one concise, evidence-backed codebase learning as a Context change, or a no-learning reason only if nothing durable was learned.`
+    return `Work on Agent Hub task ${task.id}: ${task.title}\n\n${task.body || 'Read the task note for its full brief.'}\n\n${task.worktree ? `You are working in your own git worktree at ${task.worktree.path} on branch ${task.worktree.branch}, started from ${task.worktree.base.slice(0, 10)}. Other agents work on sibling tasks in parallel in their own worktrees. Commit your work on this branch and do not modify the main checkout at ${repo}. Dependencies may need installing in this worktree.\n\n` : ''}Acceptance checks:\n${task.acceptance?.length ? task.acceptance.map(item => `- ${item}`).join('\n') : '- Define and verify a concrete outcome.'}\n\nImages to inspect:\n${task.images?.length ? task.images.map(image => `- ${join(repo, image.path)}${image.description ? ` — ${image.description}` : ''}`).join('\n') : '- None attached.'}\n\nThe Tasks canvas is the repository's shared context (${summary.total} notes, ${summary.byKind.context ?? 0} codebase context notes). Read .agents-hub/README.md and .agents-hub/notes/${task.id}.md. Query the board for other relevant tasks, notes, and context before changing code. Linked context:\n${context.length ? context.map(note => `- ${note.id} ${note.title}: ${note.body.slice(0, 280)}`).join('\n') : '- None linked.'}\n\nOther codebase context to check:\n${recentContext.length ? recentContext.map(note => `- ${note.id} ${note.title}`).join('\n') : '- None.'}\n\nBoard tools: use the board_* MCP tools, or run agent-hub-board summary (then search '{"kind":"context"}', read '"${task.id}"'). Without either, read the note files directly. Log meaningful steps with board_log_progress (agent-hub-board log \"...\") so progress shows on the canvas; if you need a decision, ask with board_ask and end your turn, and the answer will be typed here. After coding, complete the Task with board_complete_task (agent-hub-board complete-task): give the outcome, checked acceptance criteria, and one concise, evidence-backed codebase learning as a Context change, or a no-learning reason only if nothing durable was learned.`
   }
   private boardBriefing(repo: string, sessionId: string) {
     const snapshot = this.boardStore.load(repo)
@@ -202,6 +203,7 @@ export class HubService extends EventEmitter {
     const requestedName = typeof args.terminalName === 'string' ? args.terminalName.trim().slice(0, 60) : ''
     return {
       id: `res-${uuid()}`, contextId, repo, name: requestedName || agent, agent, terminalKind: kind, profile,
+      ...(typeof args.cwd === 'string' && args.cwd ? (assertWorktreePath(repo, args.cwd), { cwd: args.cwd }) : {}),
       draft: emptyDraft(), terminalRunning: false, createdAt: now, updatedAt: now,
     }
   }
@@ -305,7 +307,7 @@ export class HubService extends EventEmitter {
             if (resource.conversationId) this.resumes.set(resource.id, Date.now()); else this.resumes.delete(resource.id)
             this.activity.start(resource.id, { hooks: !!hookUrl })
           }
-          const snapshot = await this.terminals.open(resource.id, resource.repo, { kind: resource.terminalKind, profile, env: boardEnv, cols: args.cols, rows: args.rows })
+          const snapshot = await this.terminals.open(resource.id, resource.cwd ?? resource.repo, { kind: resource.terminalKind, profile, env: boardEnv, cols: args.cols, rows: args.rows })
           resource.terminalRunning = snapshot.running
           resource.updatedAt = new Date().toISOString(); context.updatedAt = resource.updatedAt
           this.flush()
@@ -391,6 +393,44 @@ export class HubService extends EventEmitter {
           catch { /* the asking terminal was deleted; the answer stays in the Task log */ }
         }
         return { note, delivery }
+      }
+      case 'board:fanout': {
+        // One worktree, Session, and agent per open subtask, all at once.
+        const repo = this.repo(args.repo)
+        const parent = this.boardStore.query(repo, { type: 'read', id: String(args.taskId) }) as BoardNote | null
+        if (!parent || parent.kind !== 'task') throw new Error('Task no longer exists.')
+        const children = (this.boardStore.query(repo, { type: 'search', kind: 'task', limit: 100 }) as BoardNote[])
+          .filter(note => note.parentId === parent.id && note.status === 'open' && !note.worktree)
+        if (!children.length) throw new Error('This task has no open subtasks to fan out. Split it first.')
+        if (children.length > 8) throw new Error('Fan out at most 8 subtasks at once.')
+        const started: Array<{ taskId: string; terminalId: string; branch: string }> = []
+        for (const child of children) {
+          const worktree = createWorktree(repo, child.id, child.title)
+          const contextId = `ctx-${uuid()}`
+          const resource = this.terminalResource(contextId, repo, { ...args, cwd: worktree.path, terminalName: args.terminalName || undefined })
+          const context = newContext(contextId, repo, child.title.slice(0, 60), resource)
+          this.store.state.contexts.push(context)
+          const updated = this.boardStore.apply(repo, { type: 'updateNote', id: child.id, expectedRevision: child.revision, patch: { worktree, updatedBy: 'person' } }) as BoardNote
+          this.flush()
+          await this.invoke('board:dispatch', { repo, taskId: updated.id, terminalId: context.terminals[0].id })
+          started.push({ taskId: child.id, terminalId: context.terminals[0].id, branch: worktree.branch })
+        }
+        this.boardStore.apply(repo, { type: 'appendLog', id: parent.id, actor: 'person', text: `Fanned out ${started.length} subtasks to parallel worktrees: ${started.map(item => item.branch).join(', ')}` })
+        return { started }
+      }
+      case 'board:worktree:status': {
+        const repo = this.repo(args.repo)
+        const tasks = (this.boardStore.load(repo).notes).filter(note => note.worktree)
+        return Object.fromEntries(tasks.map(note => { try { return [note.id, worktreeStatus(repo, note.worktree!)] } catch { return [note.id, null] } }))
+      }
+      case 'board:worktree:remove': {
+        const repo = this.repo(args.repo)
+        const task = this.boardStore.query(repo, { type: 'read', id: String(args.taskId) }) as BoardNote | null
+        if (!task?.worktree) throw new Error('This task has no worktree.')
+        const owner = this.store.state.contexts.find(context => context.terminals.some(terminal => terminal.cwd === task.worktree!.path))
+        if (owner) for (const terminal of owner.terminals) if (this.terminals.running(terminal.id)) await this.terminals.stop(terminal.id)
+        removeWorktree(repo, task.worktree, args.force === true)
+        return this.boardStore.apply(repo, { type: 'appendLog', id: task.id, actor: 'person', text: `Removed worktree ${task.worktree.path}; branch ${task.worktree.branch} is kept.` })
       }
       case 'board:dispatch': {
         // Hand a Task to one agent terminal: assign it to that terminal's

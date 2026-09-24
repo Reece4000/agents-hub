@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from 'react'
-import { AlertTriangle, ArrowDownRight, BookOpen, Check, ChevronDown, ChevronRight, CircleHelp, Command, CornerDownRight, FileText, Focus, Folder, Grip, History, ImagePlus, Mic, Layers3, Link2, Maximize2, Minus, MoreHorizontal, Plus, Search, Trash2, X } from 'lucide-react'
+import { AlertTriangle, GitBranch, ArrowDownRight, BookOpen, Check, ChevronDown, ChevronRight, CircleHelp, Command, CornerDownRight, FileText, Focus, Folder, Grip, History, ImagePlus, Mic, Layers3, Link2, Maximize2, Minus, MoreHorizontal, Plus, Search, Trash2, X } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { bridge } from './bridge'
@@ -45,6 +45,9 @@ const initials = (name: string) => { const words = name.trim().split(/\s+/).filt
 const canTake = (note: BoardNote) => note.kind === 'task' && note.status !== 'done'
 /** Whether a context note's evidence changed after it was verified. */
 type Freshness = { stale: boolean; reasons: string[]; verifiedAt: string }
+/** How far a Task's worktree has moved since it was created. */
+type WorktreeStatus = { exists: boolean; commits: number; files: number; insertions: number; deletions: number; dirty: boolean }
+const shortBranch = (branch: string) => branch.replace(/^agent\//, '')
 const ago = (value: string) => {
   const seconds = Math.max(0, (Date.now() - new Date(value).getTime()) / 1000)
   return seconds < 60 ? 'now' : seconds < 3600 ? `${Math.floor(seconds / 60)}m` : seconds < 86400 ? `${Math.floor(seconds / 3600)}h` : date(value)
@@ -58,6 +61,7 @@ export default function BoardCanvas({ repo, sessions, isVisible = true, focusReq
   const agents = useMemo(() => sessions.flatMap(session => session.terminals.filter(terminal => terminal.terminalKind !== 'shell')), [sessions])
   const [draggingAgent, setDraggingAgent] = useState<string | null>(null)
   const [freshness, setFreshness] = useState<Record<string, Freshness>>({})
+  const [worktrees, setWorktrees] = useState<Record<string, WorktreeStatus | null>>({})
   const [dropTarget, setDropTarget] = useState<string | null>(null)
   const [snapshot, setSnapshot] = useState<BoardSnapshot>(blank)
   const [positions, setPositions] = useState<Record<string, BoardPosition>>({})
@@ -225,6 +229,15 @@ export default function BoardCanvas({ repo, sessions, isVisible = true, focusReq
     if (created) { setPicked(new Set()); setFocusTitleId(created.id); void openNote(created.id) }
   }
   const togglePick = (id: string) => setPicked(current => { const next = new Set(current); if (next.has(id)) next.delete(id); else next.add(id); return next })
+  // Worktree progress for fanned-out tasks, refreshed while any exist.
+  const hasWorktrees = snapshot.notes.some(note => note.worktree)
+  useEffect(() => {
+    if (!repo || !hasWorktrees || !isVisible) return
+    let live = true
+    const load = () => bridge.invoke<Record<string, WorktreeStatus | null>>('board:worktree:status', { repo }).then(value => { if (live) setWorktrees(value ?? {}) }).catch(() => {})
+    const first = setTimeout(load, 300), timer = setInterval(load, 8000)
+    return () => { live = false; clearTimeout(first); clearInterval(timer) }
+  }, [repo, hasWorktrees, isVisible, snapshot])
   // Re-check context evidence against git shortly after the board settles.
   useEffect(() => {
     if (!repo || loading) return
@@ -494,13 +507,14 @@ export default function BoardCanvas({ repo, sessions, isVisible = true, focusReq
             onWheel={event => { if (editing) event.stopPropagation() }}
             onContextMenu={event => { event.stopPropagation(); if (!editing) { event.preventDefault(); setMenu({ x: event.clientX, y: event.clientY, world: worldAt(event.clientX, event.clientY), target: note.id }) } }}
           >
-            {editing ? <Inspector key={note.id} repo={repo} note={note} notes={snapshot.notes} sections={sections} sessions={sessions} focusTitle={focusTitleId === note.id} onClose={() => closeNote(note.id)} onDragStart={event => { if (!(event.target as HTMLElement).closest('button,input,select,textarea')) startDrag(event, 'note', note.id) }} apply={apply} freshness={freshness[note.id]} agents={agents} onDispatch={onDispatch} onNewAgent={onNewAgent} onFocus={focusNote} onError={onError} registerSwitch={fn => { beforeSwitch.current = fn }} /> : <>
+            {editing ? <Inspector key={note.id} repo={repo} note={note} notes={snapshot.notes} sections={sections} sessions={sessions} focusTitle={focusTitleId === note.id} onClose={() => closeNote(note.id)} onDragStart={event => { if (!(event.target as HTMLElement).closest('button,input,select,textarea')) startDrag(event, 'note', note.id) }} apply={apply} freshness={freshness[note.id]} worktree={worktrees[note.id] ?? undefined} onOpenTerminal={onOpenTerminal} agents={agents} onDispatch={onDispatch} onNewAgent={onNewAgent} onFocus={focusNote} onError={onError} registerSwitch={fn => { beforeSwitch.current = fn }} /> : <>
               <div className="kb-card-top" onPointerDown={event => { if (!(event.target as HTMLElement).closest('button,input,select,textarea')) startDrag(event, 'note', note.id) }}><span className="kb-card-kind">{kindIcon(note.kind)}{note.kind === 'context' ? 'CONTEXT' : note.kind.toUpperCase()}</span><div className="kb-card-controls"><button className="kb-card-link" aria-label={`Link ${note.title} to another note`} title="Drag to another note, or click then choose a note" disabled={snapshot.readOnly} onPointerDown={event => { event.preventDefault(); event.stopPropagation(); linkPointer.current = { from: note.id, x: event.clientX, y: event.clientY, moved: false }; setLinkFrom(note.id); setLinkCursor(worldAt(event.clientX, event.clientY)) }} onClick={event => event.stopPropagation()}><Link2 size={13} /></button></div></div>
               <button className="kb-card-open" onPointerDown={event => startDrag(event, 'note', note.id)} onClick={() => { setFocusTitleId(note.id); void openNote(note.id) }}><strong>{note.title}</strong>{note.body && <span>{note.body}</span>}</button>
               {note.question ? <div className="kb-card-question" title={note.question.text}><CircleHelp size={13} /><span>{note.question.text}</span></div>
                 : live ? <button className={`kb-card-live state-${live.state}`} title={`${live.name}: ${live.status} · show terminal`} onPointerDown={event => event.stopPropagation()} onClick={event => { event.stopPropagation(); onOpenTerminal(live.terminalId) }}><i /><span><strong>{live.name}</strong> {live.status}</span></button>
                 : stale ? <div className="kb-card-stale" title={stale.reasons.join('\n')}><AlertTriangle size={12} /><span>Re-verify · {stale.reasons[0]}</span></div>
                 : lastLog && note.status !== 'done' ? <div className="kb-card-log" title={lastLog.text}><CornerDownRight size={12} /><span>{lastLog.text}</span><time>{ago(lastLog.at)}</time></div> : null}
+              {note.worktree && <div className="kb-card-branch" title={`${note.worktree.branch}\n${note.worktree.path}`}><GitBranch size={11} /><span>{shortBranch(note.worktree.branch)}</span>{worktrees[note.id] && (worktrees[note.id]!.exists ? <small><b className="plus">+{worktrees[note.id]!.insertions}</b> <b className="minus">−{worktrees[note.id]!.deletions}</b>{worktrees[note.id]!.commits ? ` · ${worktrees[note.id]!.commits}c` : ''}</small> : <small>removed</small>)}</div>}
               <div className="kb-card-foot"><span>{note.status ? <><i className={`kb-status status-${note.status}`} />{statusLabel[note.status]}</> : note.kind === 'context' ? 'CODEBASE CONTEXT' : 'NOTE'}</span><span>{date(note.updatedAt)}</span></div>
             </>}
           </article>
@@ -517,7 +531,7 @@ export default function BoardCanvas({ repo, sessions, isVisible = true, focusReq
         <button onClick={() => void taskFromPicks()} disabled={snapshot.readOnly}><Plus size={13} /> Task from these</button>
         <button className="kb-selection-clear" aria-label="Clear selection" title="Clear selection (Esc)" onClick={() => setPicked(new Set())}><X size={14} /></button>
       </div>}
-      <div className="kb-agents" aria-label="Agents: drag onto a task to hand it over">
+      <div className={`kb-agents${selectedId ? ' receded' : ''}`} aria-label="Agents: drag onto a task to hand it over">
         {agents.map(agent => { const state = terminalState(agent); return <button key={agent.id} className={`kb-puck state-${state}${draggingPack ? ' pack-ready' : ''}${packTarget === agent.id ? ' pack-target' : ''}`} draggable
           onDragOver={event => { if (!event.dataTransfer.types.includes(PACK_DRAG)) return; event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; setPackTarget(agent.id) }}
           onDragLeave={() => setPackTarget(current => current === agent.id ? null : current)}
@@ -572,7 +586,7 @@ function fit(snapshot: BoardSnapshot, element: HTMLDivElement | null, setViewpor
   setViewport({ x: rect.width / 2 - (minX + maxX) / 2 * zoom, y: rect.height / 2 - (minY + maxY) / 2 * zoom, zoom })
 }
 
-function Inspector({ repo, note, notes, sections, sessions, focusTitle, onClose, onDragStart, apply, freshness, agents, onDispatch, onNewAgent, onFocus, onError, registerSwitch }: { repo: string; note: BoardNote; notes: BoardNote[]; sections: BoardSection[]; sessions: RepoContext[]; focusTitle: boolean; onClose: () => void; onDragStart: (event: ReactPointerEvent) => void; apply: (command: BoardCommand) => Promise<unknown>; freshness?: Freshness; agents: TerminalResource[]; onDispatch: (taskId: string, terminalId: string) => void; onNewAgent: () => void; onFocus: (note: BoardNote) => void; onError: (message: string) => void; registerSwitch: (fn: (() => Promise<boolean>) | null) => void }) {
+function Inspector({ repo, note, notes, sections, sessions, focusTitle, onClose, onDragStart, apply, freshness, worktree, onOpenTerminal, agents, onDispatch, onNewAgent, onFocus, onError, registerSwitch }: { repo: string; note: BoardNote; notes: BoardNote[]; sections: BoardSection[]; sessions: RepoContext[]; focusTitle: boolean; onClose: () => void; onDragStart: (event: ReactPointerEvent) => void; apply: (command: BoardCommand) => Promise<unknown>; freshness?: Freshness; worktree?: WorktreeStatus; onOpenTerminal: (terminalId: string) => void; agents: TerminalResource[]; onDispatch: (taskId: string, terminalId: string) => void; onNewAgent: () => void; onFocus: (note: BoardNote) => void; onError: (message: string) => void; registerSwitch: (fn: (() => Promise<boolean>) | null) => void }) {
   const [draft, setDraft] = useState(note)
   const draftRef = useRef(note)
   const savedRef = useRef(note)
@@ -738,6 +752,8 @@ function Inspector({ repo, note, notes, sections, sessions, focusTitle, onClose,
       <div className="kb-image-section"><div><span>Images</span><button type="button" onClick={() => imageInput.current?.click()}><ImagePlus size={14} /> Add image</button><input ref={imageInput} type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden onChange={event => { void addImages(Array.from(event.target.files ?? [])); event.target.value = '' }} /></div>{(draft.images ?? []).map(image => <div className="kb-image-row" key={image.id}>{imagePreviews[image.id] ? <img src={imagePreviews[image.id]} alt={image.description || image.name} /> : <div className="kb-image-missing">Preview unavailable</div>}<div><strong>{image.name}</strong><input aria-label={`Description for ${image.name}`} value={image.description ?? ''} placeholder="Describe this image for the agent" onChange={event => edit(current => ({ ...current, images: (current.images ?? []).map(item => item.id === image.id ? { ...item, description: event.target.value } : item) }))} /></div><button type="button" aria-label={`Remove ${image.name}`} onClick={() => edit(current => ({ ...current, images: (current.images ?? []).filter(item => item.id !== image.id) }))}><X size={14} /></button></div>)}</div>
       {draft.kind === 'task' && <><label className="kb-field">Acceptance checks<textarea rows={3} value={(draft.acceptance ?? []).join('\n')} onChange={e => edit(d => ({ ...d, acceptance: e.target.value.split('\n') }))} placeholder="One observable check per line" /></label><div className="kb-inspector-meta"><label>Session<select value={draft.sessionId ?? ''} onChange={e => edit(d => ({ ...d, sessionId: e.target.value }))}><option value="">No Session</option>{sessions.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}</select></label><label>Agent<input value={draft.agent ?? ''} onChange={e => edit(d => ({ ...d, agent: e.target.value }))} placeholder="Optional" /></label></div><label className="kb-field">Outcome<textarea rows={3} value={draft.outcome ?? ''} onChange={e => edit(d => ({ ...d, outcome: e.target.value }))} placeholder="What changed? What did we verify?" /></label>{draft.status === 'done' && <div className={`kb-capture capture-${draft.captureState}`}>{draft.captureState === 'captured' ? 'Knowledge captured in codebase context' : draft.captureState === 'none' ? 'Completed with no durable learning' : draft.captureState === 'legacy_unknown' ? 'Imported completed task · historical learning unknown' : 'Knowledge capture pending'}</div>}</>}
       {draft.kind === 'context' && <><label className="kb-field">Subject<input value={draft.subject ?? ''} onChange={e => edit(d => ({ ...d, subject: e.target.value }))} placeholder="e.g. authentication persistence" /></label><label className="kb-field">Evidence paths<textarea rows={3} value={(draft.evidence ?? []).map(item => item.path).join('\n')} onChange={e => edit(d => ({ ...d, evidence: e.target.value.split('\n').map(path => ({ path: path.trim() })).filter(item => item.path) }))} placeholder="server/auth.ts" /></label></>}
+      {note.kind === 'task' && note.worktree && <WorktreePanel repo={repo} note={note} status={worktree} sessions={sessions} onOpenTerminal={onOpenTerminal} onError={onError} />}
+      {note.kind === 'task' && note.status !== 'done' && !note.worktree && <SubtaskPanel repo={repo} note={note} notes={notes} agents={agents} onFocus={onFocus} onError={onError} />}
       {!!note.log?.length && <ProgressLog entries={note.log} />}
       <div className="kb-related"><div><span className="kb-eyebrow">LINKED NOTES</span><span>{related.length}</span></div>{related.map(item => <div className="kb-related-row" key={item.id}><button onClick={() => onFocus(item)}>{kindIcon(item.kind)}<span>{item.title}</span><ChevronRight size={13} /></button><button className="kb-unlink" aria-label={`Unlink ${item.title}`} title="Remove link" onClick={() => void unlink(item)}><X size={13} /></button></div>)}<p>On the canvas, drag the link handle from one note to another. You can also click the handle, then click the destination.</p></div>
       {history && <div className="kb-history"><span className="kb-eyebrow">PREVIOUS VERSIONS</span>{history.map(item => <button key={item.revision} onClick={() => { replaceDraft({ ...item.note, revision: savedRevision }); setHistory(null) }}>{date(item.note.updatedAt)} · {item.note.title}</button>)}{!history.length && <p>No earlier versions yet.</p>}</div>}
@@ -796,5 +812,69 @@ function StalePanel({ note, freshness, apply, onFocus, onError }: { note: BoardN
     <div className="kb-stale-head"><AlertTriangle size={15} /><strong>May be out of date</strong><span>verified {date(freshness.verifiedAt)}</span></div>
     <ul>{freshness.reasons.map(reason => <li key={reason}>{reason}</li>)}</ul>
     <div className="kb-stale-actions"><button disabled={busy} onClick={() => void verify()}>Still true · mark verified</button><button disabled={busy} className="kb-work" onClick={() => void recheck()}>Create re-verify task</button></div>
+  </section>
+}
+
+/** A task's subtasks, and the two ways to use them: ask an agent to split
+ *  the task, or fan the open subtasks out to parallel agents in worktrees. */
+function SubtaskPanel({ repo, note, notes, agents, onFocus, onError }: { repo: string; note: BoardNote; notes: BoardNote[]; agents: TerminalResource[]; onFocus: (note: BoardNote) => void; onError: (message: string) => void }) {
+  const children = notes.filter(item => item.parentId === note.id)
+  const open = children.filter(item => item.status === 'open' && !item.worktree)
+  const [providers, setProviders] = useState<Array<{ kind: string; label: string; executable: string | null }>>([])
+  const [kind, setKind] = useState('')
+  const [splitter, setSplitter] = useState('')
+  const [busy, setBusy] = useState(false)
+  useEffect(() => {
+    if (!bridge.desktop) return
+    bridge.invoke<Array<{ kind: string; label: string; executable: string | null }>>('terminalProviders').then(items => { const installed = items.filter(item => item.executable); setProviders(installed); setKind(current => current || installed[0]?.kind || '') }).catch(() => {})
+  }, [])
+  useEffect(() => { setSplitter(current => current || agents[0]?.id || '') }, [agents])
+  const split = async () => {
+    if (!splitter) return
+    setBusy(true)
+    try {
+      const delivery = await bridge.invoke<'sent' | 'queued'>('terminal:deliver', { id: splitter, text: `Split Agent Hub Task ${note.id} ("${note.title}") into 2 to 5 independent subtasks that different agents could do in parallel without touching the same files. Read the Task first. Create each with board_create_note (kind "task", parentId "${note.id}"), a clear title, a brief, and observable acceptance checks. Do not start implementing; reply with the list when done.` })
+      onError(delivery === 'queued' ? 'The agent will split this task when it is idle.' : 'Asked the agent to split this task.')
+    } catch (error) { onError((error as Error).message) } finally { setBusy(false) }
+  }
+  const fanOut = async () => {
+    setBusy(true)
+    try {
+      const result = await bridge.invoke<{ started: unknown[] }>('board:fanout', { repo, taskId: note.id, terminalKind: kind })
+      onError(`Started ${result.started.length} agents in their own worktrees.`)
+    } catch (error) { onError((error as Error).message) } finally { setBusy(false) }
+  }
+  return <section className="kb-subtasks" aria-label="Subtasks">
+    <div><span className="kb-eyebrow">SUBTASKS</span><span>{children.length}</span></div>
+    {children.map(child => <button key={child.id} className="kb-subtask" onClick={() => onFocus(child)}><i className={`kb-status status-${child.status}`} /><span>{child.title}</span>{child.worktree && <small><GitBranch size={10} /> {shortBranch(child.worktree.branch)}</small>}</button>)}
+    {open.length > 0 ? <div className="kb-subtask-actions">
+      <select aria-label="Agent for each subtask" value={kind} onChange={event => setKind(event.target.value)}>{providers.map(item => <option key={item.kind} value={item.kind}>{item.label}</option>)}{!providers.length && <option value="">No agent CLI found</option>}</select>
+      <button className="kb-work" disabled={busy || !kind} onClick={() => void fanOut()} title="One git worktree, branch, Session, and agent per open subtask"><GitBranch size={13} /> Fan out {open.length} subtask{open.length === 1 ? '' : 's'}</button>
+    </div> : children.length === 0 && <div className="kb-subtask-actions">
+      <select aria-label="Agent to split this task" value={splitter} onChange={event => setSplitter(event.target.value)}>{agents.map(agent => <option key={agent.id} value={agent.id}>{agent.name}</option>)}{!agents.length && <option value="">Start an agent first</option>}</select>
+      <button className="kb-work" disabled={busy || !splitter} onClick={() => void split()}>Split with agent</button>
+    </div>}
+  </section>
+}
+
+/** A fanned-out task's branch: progress since it started, and the ways to
+ *  finish it (merge command, remove the worktree). */
+function WorktreePanel({ repo, note, status, sessions, onOpenTerminal, onError }: { repo: string; note: BoardNote; status?: WorktreeStatus; sessions: RepoContext[]; onOpenTerminal: (terminalId: string) => void; onError: (message: string) => void }) {
+  const worktree = note.worktree!
+  const terminal = sessions.flatMap(session => session.terminals).find(item => item.cwd === worktree.path)
+  const [confirm, setConfirm] = useState(false)
+  const remove = async () => {
+    try { await bridge.invoke('board:worktree:remove', { repo, taskId: note.id, force: confirm }); setConfirm(false) }
+    catch (error) { if (/uncommitted/.test((error as Error).message)) setConfirm(true); onError((error as Error).message) }
+  }
+  const merge = `git merge --no-ff ${worktree.branch}`
+  return <section className="kb-worktree" aria-label="Worktree">
+    <div className="kb-worktree-head"><GitBranch size={14} /><strong>{worktree.branch}</strong>{status && (status.exists ? <span><b className="plus">+{status.insertions}</b> <b className="minus">−{status.deletions}</b> · {status.files} file{status.files === 1 ? '' : 's'} · {status.commits} commit{status.commits === 1 ? '' : 's'}{status.dirty ? ' · uncommitted' : ''}</span> : <span>worktree removed</span>)}</div>
+    <code title={worktree.path}>{worktree.path.replace(repo, '.')}</code>
+    <div className="kb-worktree-actions">
+      {terminal && <button onClick={() => onOpenTerminal(terminal.id)}>Show agent</button>}
+      <button onClick={() => void navigator.clipboard.writeText(merge).then(() => onError('Merge command copied.')).catch(() => onError(merge))} title={merge}>Copy merge command</button>
+      {status?.exists !== false && <button className={confirm ? 'danger' : ''} onClick={() => void remove()}>{confirm ? 'Remove anyway' : 'Remove worktree'}</button>}
+    </div>
   </section>
 }

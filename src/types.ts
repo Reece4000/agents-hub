@@ -18,6 +18,8 @@ export interface TerminalResource {
   id: string; contextId: string; repo: string; name: string; agent: string;
   terminalKind: TerminalKind;
   profile?: TerminalProfile;
+  /** Working directory when it is not the repository root: a Task's worktree. */
+  cwd?: string;
   draft: Draft;
   terminalRunning?: boolean;
   /** Live agent state; never persisted. */

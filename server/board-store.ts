@@ -1,8 +1,8 @@
 import { createHash, randomBytes, randomUUID as cryptoRandomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { accessSync, constants, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, watch, writeFileSync, type FSWatcher } from 'node:fs'
-import { basename, join, resolve, sep } from 'node:path'
-import type { ProgressEntry, TaskQuestion, BoardCommand, BoardImage, BoardLink, BoardNote, BoardPosition, BoardQuery, BoardSection, BoardSnapshot, Evidence, NoteKind, TaskState } from '../shared/board'
+import { basename, isAbsolute, join, resolve, sep } from 'node:path'
+import type { ProgressEntry, TaskQuestion, TaskWorktree, BoardCommand, BoardImage, BoardLink, BoardNote, BoardPosition, BoardQuery, BoardSection, BoardSnapshot, Evidence, NoteKind, TaskState } from '../shared/board'
 import { withMissingPositions } from '../shared/board-layout'
 
 const idPattern = /^(?:AH-[A-F0-9]{8}|[A-Z]{2}-[A-F0-9]{12})$/
@@ -19,6 +19,7 @@ const isLink = (value: any): value is BoardLink => value && idPattern.test(value
 const LOG_LIMIT = 200
 const logList = (value: unknown): ProgressEntry[] => Array.isArray(value) ? value.filter(v => v && typeof v.text === 'string' && v.text.trim()).slice(-LOG_LIMIT).map(v => ({ at: text(v.at, 40) || now(), actor: text(v.actor, 100) || 'agent', text: text(v.text, 2000) })) : []
 const questionValue = (value: any): TaskQuestion | undefined => value && typeof value.text === 'string' && value.text.trim() ? { text: text(value.text, 2000), askedBy: text(value.askedBy, 100) || 'agent', askedAt: text(value.askedAt, 40) || now(), ...(list(value.options, 8).length ? { options: list(value.options, 8) } : {}), ...(typeof value.terminalId === 'string' && /^[\w-]{1,120}$/.test(value.terminalId) ? { terminalId: value.terminalId } : {}) } : undefined
+const worktreeValue = (value: any): TaskWorktree | undefined => value && typeof value.path === 'string' && isAbsolute(value.path) && typeof value.branch === 'string' && /^[\w./-]{1,200}$/.test(value.branch) && typeof value.base === 'string' && /^[a-f0-9]{7,64}$/.test(value.base) ? { path: text(value.path, 1000), branch: value.branch, base: value.base } : undefined
 const evidenceList = (value: unknown): Evidence[] => Array.isArray(value) ? value.slice(0, 30).filter(v => v && typeof v.path === 'string' && v.path.trim()).map(v => ({ path: text(v.path, 500), ...(v.detail ? { detail: text(v.detail, 500) } : {}) })) : []
 const imageId = /^[a-f0-9-]{36}$/
 const imageTypes: Record<string, { extension: string; valid: (data: Buffer) => boolean }> = {
@@ -182,6 +183,8 @@ export class BoardStore extends EventEmitter {
       if (log.length) note.log = log
       const question = questionValue(value.question)
       if (question) note.question = question
+      const worktree = worktreeValue(value.worktree)
+      if (worktree) note.worktree = worktree
     } else if (note.kind === 'context') {
       note.subject = text(value.subject, 200)
       note.evidence = evidenceList(value.evidence)
@@ -436,6 +439,7 @@ export class BoardStore extends EventEmitter {
         next.agent = patch.agent === undefined ? current.agent ?? '' : text(patch.agent, 120)
         next.outcome = patch.outcome === undefined ? current.outcome ?? '' : text(patch.outcome, 60000)
         next.captureState = next.status === 'done' && current.status !== 'done' ? 'pending' : current.captureState ?? 'pending'
+        if (patch.worktree !== undefined) { const worktree = worktreeValue(patch.worktree); if (worktree) next.worktree = worktree; else delete next.worktree }
       } else if (kind === 'context') {
         next.subject = patch.subject === undefined ? current.subject ?? next.title : text(patch.subject, 200)
         next.evidence = patch.evidence === undefined ? current.evidence ?? [] : evidenceList(patch.evidence)

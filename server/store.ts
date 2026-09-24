@@ -24,6 +24,7 @@ function normalizeResource(raw: any, contextId: string, repo: string): TerminalR
     id: typeof raw?.id === 'string' ? raw.id : `terminal-${contextId}`, contextId, repo,
     name: text(raw?.name, 60) || agent, agent, terminalKind: kind, ...(profile && kind !== 'shell' ? { profile } : {}),
     draft: raw?.draft && typeof raw.draft === 'object' && Array.isArray(raw.draft.attachments) ? raw.draft : emptyDraft(),
+    ...(typeof raw?.cwd === 'string' && raw.cwd.startsWith('/') ? { cwd: raw.cwd.slice(0, 1000) } : {}),
     ...(typeof raw?.conversationId === 'string' && /^[\w-]{1,200}$/.test(raw.conversationId) && kind !== 'shell' ? { conversationId: raw.conversationId } : {}),
     terminalRunning: false, createdAt: String(raw?.createdAt ?? now), updatedAt: String(raw?.updatedAt ?? now),
   }
