@@ -7,6 +7,11 @@ export interface BoardLink { to: string; kind: LinkKind }
 export interface Evidence { path: string; detail?: string }
 export interface BoardImage { id: string; path: string; name: string; mime: string; size: number; description?: string; preview?: string }
 export interface UserSource { title: string; body: string }
+/** One line of a Task's append-only progress timeline. */
+export interface ProgressEntry { at: string; actor: string; text: string }
+/** A question an agent asked the person about a Task. Answering it on the
+ *  canvas delivers the answer to `terminalId` when that terminal is idle. */
+export interface TaskQuestion { text: string; options?: string[]; askedBy: string; askedAt: string; terminalId?: string }
 export interface BoardNote {
   id: string
   kind: NoteKind
@@ -32,6 +37,10 @@ export interface BoardNote {
   sourceTaskIds?: string[]
   verifiedAt?: string
   legacyStatus?: string
+  /** Task only: the Task this one was split from. */
+  parentId?: string
+  log?: ProgressEntry[]
+  question?: TaskQuestion
 }
 export interface BoardSection { id: string; title: string; x: number; y: number; width: number; height: number; collapsed: boolean }
 export interface BoardPosition { x: number; y: number }
@@ -52,6 +61,11 @@ export type BoardCommand =
   | { type: 'deleteSection'; id: string; keepNotes: boolean; operationId?: string }
   | { type: 'trashNote'; id: string; expectedRevision: string; operationId?: string }
   | { type: 'restoreNote'; id: string; operationId?: string }
+  | { type: 'appendLog'; id: string; actor: string; text: string; operationId?: string }
+  | { type: 'addLink'; id: string; to: string; kind?: LinkKind; actor?: string; operationId?: string }
+  | { type: 'askQuestion'; id: string; actor: string; text: string; options?: string[]; terminalId?: string; operationId?: string }
+  | { type: 'answerQuestion'; id: string; answer: string; operationId?: string }
+  | { type: 'attachImage'; id: string; image: BoardImage; actor?: string; operationId?: string }
   | { type: 'completeTask'; id: string; expectedRevision: string; outcome: string; acceptance: string[]; contextChanges: Array<{ id?: string; expectedRevision?: string; title: string; body: string; subject: string; evidence: Evidence[] }>; noLearningReason?: string; actor: string; operationId: string }
 export type BoardQuery =
   | { type: 'summary' }

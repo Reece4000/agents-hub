@@ -62,6 +62,7 @@ export interface Bridge {
   onBoard?: (listener: (snapshot: BoardSnapshot) => void) => () => void;
   onTerminal?: (listener: (event: {id:string; data?:string; seq?:number; exitCode?:number}) => void) => () => void;
   onFocusTerminal?: (listener: (id: string) => void) => () => void;
+  onFocusNote?: (listener: (target: { repo: string; id: string }) => void) => () => void;
   terminalInput?: (id:string,data:string) => void;
   terminalResize?: (id:string,cols:number,rows:number) => void;
 }

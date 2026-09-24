@@ -7,7 +7,13 @@ In an Agent Hub terminal the board is available two ways:
 - MCP tools named `board_*` (Claude Code and Codex terminals are configured automatically).
 - The `agent-hub-board` command: `agent-hub-board summary`, then `search`, `read`, or `related` with one JSON argument, e.g. `agent-hub-board search '{"kind":"context","text":"database"}'`.
 
-Start with `board_summary`. Its `activeTask` is the Task your Session is working on; read it, search for related Context notes, and keep its status current. Mutations take the `expectedRevision` from a fresh read; read again if another writer changed a note.
+Start with `board_summary`. Its `activeTask` is the Task your Session is working on; read it, search for related Context notes, and keep its status current. While you work:
+
+- `board_log_progress` (`agent-hub-board log "…"`) adds a line to the Task's timeline on the person's canvas. Log meaningful steps, not every action.
+- `board_ask` (`agent-hub-board ask "…"`) puts a question on the Task's card when you need a decision. End your turn after asking; the answer is typed into your terminal.
+- `board_create_note` splits work into subtasks (`parentId`) or records a note; `board_link_notes` relates notes; `board_attach_image` adds a screenshot.
+
+`board_update_task` and `board_complete_task` take the `expectedRevision` from a fresh read; read again if another writer changed a note.
 
 On completion, record the outcome and checked acceptance criteria with `board_complete_task` (`agent-hub-board complete-task`), capturing one concise, evidence-backed codebase fact in a Context note. Give a no-learning reason only when nothing durable was learned. Without the board tools, read these Markdown files directly and leave edits to an Agent Hub terminal.
 

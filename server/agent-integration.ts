@@ -38,6 +38,10 @@ export interface LaunchContext {
   repo: string
   /** Agent Hub Session (context) id, so board tools find the working Task. */
   sessionId: string
+  /** This terminal, so an answer to the agent's question comes back here. */
+  terminalId?: string
+  /** Author name for the agent's board changes. */
+  agentName?: string
   board?: BoardRuntime
   /** Per-terminal event endpoint for hooks; absent disables hooks. */
   hookUrl?: string
@@ -52,7 +56,7 @@ export const HOOK_COMMAND = `curl -s -o /dev/null -m 2 -H 'content-type: applica
 
 const boardServer = (context: LaunchContext) => context.board ? {
   command: context.board.runtime, args: [context.board.cli, 'mcp'],
-  env: { ELECTRON_RUN_AS_NODE: '1', AGENT_HUB_REPO: context.repo, AGENT_HUB_SESSION_ID: context.sessionId },
+  env: { ELECTRON_RUN_AS_NODE: '1', AGENT_HUB_REPO: context.repo, AGENT_HUB_SESSION_ID: context.sessionId, ...(context.terminalId ? { AGENT_HUB_TERMINAL_ID: context.terminalId } : {}), ...(context.agentName ? { AGENT_HUB_AGENT_NAME: context.agentName } : {}) },
 } : null
 
 /** Extra argv and environment for an integrated agent: hooks that report its
@@ -64,14 +68,19 @@ export function launchPlan(provider: Provider | null, baseArgs: string[], contex
     const args = [...baseArgs]
     const server = boardServer(context)
     if (server) args.push('--mcp-config', JSON.stringify({ mcpServers: { 'agent-hub': { type: 'stdio', ...server } } }))
+    const settings: Record<string, unknown> = {}
+    // The board server only reads and writes this repository's
+    // `.agents-hub` notes, so its tools skip Claude's approval prompt.
+    if (server) settings.permissions = { allow: ['mcp__agent-hub'] }
     if (context.hookUrl) {
       const hook = [{ type: 'command', command: HOOK_COMMAND, timeout: 5 }]
       const all = [{ matcher: '*', hooks: hook }]
-      args.push('--settings', JSON.stringify({ hooks: {
+      settings.hooks = {
         SessionStart: [{ hooks: hook }], UserPromptSubmit: [{ hooks: hook }], PreToolUse: all,
         PermissionRequest: all, Notification: [{ hooks: hook }], Stop: [{ hooks: hook }],
-      } }))
+      }
     }
+    if (Object.keys(settings).length) args.push('--settings', JSON.stringify(settings))
     if (context.resumeId) return { args: [...args, '--resume', context.resumeId], env, conversationId: context.resumeId }
     const conversationId = randomUUID()
     return { args: [...args, '--session-id', conversationId], env, conversationId }

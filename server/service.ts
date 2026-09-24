@@ -37,6 +37,10 @@ export class HubService extends EventEmitter {
   private boardBin = ''
   activity = new ActivityTracker()
   private events = new AgentEventServer((id, payload) => this.agentEvent(id, payload))
+  /** Messages waiting for their terminal's agent to be idle, per terminal. */
+  private outbox = new Map<string, string[]>()
+  /** Questions already seen per repo (task id + time asked), so only new ones notify. */
+  private seenQuestions = new Map<string, Set<string>>()
   /** Terminals launched to resume a conversation, with their start time, so
    *  a resume the agent rejects can fall back to a fresh conversation. */
   private resumes = new Map<string, number>()
@@ -47,7 +51,7 @@ export class HubService extends EventEmitter {
       catch { /* terminals still get AGENT_HUB_BOARD_RUNTIME and AGENT_HUB_BOARD_CLI */ }
     }
     this.ticketStore.on('change', snapshot => this.emit('tickets', snapshot))
-    this.boardStore.on('change', snapshot => this.emit('board', snapshot))
+    this.boardStore.on('change', snapshot => { this.emit('board', snapshot); this.noticeQuestions(snapshot) })
     this.terminals.on('data', event => {
       this.emit('terminal', event)
       this.activity.output(event.id)
@@ -72,11 +76,43 @@ export class HubService extends EventEmitter {
     this.activity.on('change', (id: string, activity) => {
       let resource: TerminalResource
       try { resource = this.store.resource(id) } catch { return }
+      if (activity.state === 'idle') setTimeout(() => this.flushOutbox(id), 400)
       const previous = resource.activity
       resource.activity = activity
       this.emit('activity', { resource: liveResource(resource), previous })
       this.changed(id)
     })
+  }
+  /** Type a message into an agent's terminal as its next prompt. It is sent
+   *  once the agent is idle (never over a permission prompt or mid-turn), so
+   *  a briefing or an answer can be handed over while the agent is busy. */
+  deliver(id: string, message: string): 'sent' | 'queued' {
+    const queue = this.outbox.get(id) ?? []
+    queue.push(message)
+    this.outbox.set(id, queue)
+    this.flushOutbox(id)
+    return this.outbox.has(id) ? 'queued' : 'sent'
+  }
+  private flushOutbox(id: string) {
+    const queue = this.outbox.get(id)
+    if (!queue?.length || !this.terminals.running(id)) return
+    const state = this.activity.get(id)?.state
+    if (state && state !== 'idle') return
+    const message = queue.shift()!
+    if (!queue.length) this.outbox.delete(id)
+    this.terminals.write(id, `\x1b[200~${message}\x1b[201~`)
+    // Submit after the paste lands, then send any further queued message.
+    setTimeout(() => { this.terminals.write(id, '\r'); if (this.outbox.has(id)) setTimeout(() => this.flushOutbox(id), 400) }, 150)
+  }
+  /** Emit `question` for each Task question that appeared since the last
+   *  snapshot of this repo, and `questions` with every open one. */
+  private noticeQuestions(snapshot: { repo: string; notes: BoardNote[] }) {
+    const open = snapshot.notes.filter(note => note.question)
+    const seen = this.seenQuestions.get(snapshot.repo)
+    const keys = new Set(open.map(note => `${note.id}@${note.question!.askedAt}`))
+    if (seen) for (const note of open) if (!seen.has(`${note.id}@${note.question!.askedAt}`)) this.emit('question', { repo: snapshot.repo, note })
+    this.seenQuestions.set(snapshot.repo, keys)
+    this.emit('questions', { repo: snapshot.repo, count: open.length })
   }
   /** A structured event from an agent's hooks. Once the person has sent a
    *  message, the agent's conversation id is kept so reopening resumes it. */
@@ -138,7 +174,7 @@ export class HubService extends EventEmitter {
     const summary = this.boardStore.query(repo, { type: 'summary' }) as { total: number; byKind: Record<string, number> }
     const context = related.filter(note => note.kind === 'context').slice(0, 6)
     const recentContext = (this.boardStore.query(repo, { type: 'search', kind: 'context', limit: 200 }) as BoardNote[]).filter(note => !context.some(linked => linked.id === note.id)).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 6)
-    return `Work on Agent Hub task ${task.id}: ${task.title}\n\n${task.body || 'Read the task note for its full brief.'}\n\nAcceptance checks:\n${task.acceptance?.length ? task.acceptance.map(item => `- ${item}`).join('\n') : '- Define and verify a concrete outcome.'}\n\nImages to inspect:\n${task.images?.length ? task.images.map(image => `- ${join(repo, image.path)}${image.description ? ` — ${image.description}` : ''}`).join('\n') : '- None attached.'}\n\nThe Tasks canvas is the repository's shared context (${summary.total} notes, ${summary.byKind.context ?? 0} codebase context notes). Read .agents-hub/README.md and .agents-hub/notes/${task.id}.md. Query the board for other relevant tasks, notes, and context before changing code. Linked context:\n${context.length ? context.map(note => `- ${note.id} ${note.title}: ${note.body.slice(0, 280)}`).join('\n') : '- None linked.'}\n\nOther codebase context to check:\n${recentContext.length ? recentContext.map(note => `- ${note.id} ${note.title}`).join('\n') : '- None.'}\n\nBoard tools: use the board_* MCP tools, or run agent-hub-board summary (then search '{"kind":"context"}', read '"${task.id}"'). Without either, read the note files directly. Keep this Task status current. After coding, complete the Task with board_complete_task (agent-hub-board complete-task): give the outcome, checked acceptance criteria, and one concise, evidence-backed codebase learning as a Context change, or a no-learning reason only if nothing durable was learned.`
+    return `Work on Agent Hub task ${task.id}: ${task.title}\n\n${task.body || 'Read the task note for its full brief.'}\n\nAcceptance checks:\n${task.acceptance?.length ? task.acceptance.map(item => `- ${item}`).join('\n') : '- Define and verify a concrete outcome.'}\n\nImages to inspect:\n${task.images?.length ? task.images.map(image => `- ${join(repo, image.path)}${image.description ? ` — ${image.description}` : ''}`).join('\n') : '- None attached.'}\n\nThe Tasks canvas is the repository's shared context (${summary.total} notes, ${summary.byKind.context ?? 0} codebase context notes). Read .agents-hub/README.md and .agents-hub/notes/${task.id}.md. Query the board for other relevant tasks, notes, and context before changing code. Linked context:\n${context.length ? context.map(note => `- ${note.id} ${note.title}: ${note.body.slice(0, 280)}`).join('\n') : '- None linked.'}\n\nOther codebase context to check:\n${recentContext.length ? recentContext.map(note => `- ${note.id} ${note.title}`).join('\n') : '- None.'}\n\nBoard tools: use the board_* MCP tools, or run agent-hub-board summary (then search '{"kind":"context"}', read '"${task.id}"'). Without either, read the note files directly. Log meaningful steps with board_log_progress (agent-hub-board log \"...\") so progress shows on the canvas; if you need a decision, ask with board_ask and end your turn, and the answer will be typed here. After coding, complete the Task with board_complete_task (agent-hub-board complete-task): give the outcome, checked acceptance criteria, and one concise, evidence-backed codebase learning as a Context change, or a no-learning reason only if nothing durable was learned.`
   }
   private boardBriefing(repo: string, sessionId: string) {
     const snapshot = this.boardStore.load(repo)
@@ -168,6 +204,8 @@ export class HubService extends EventEmitter {
       draft: emptyDraft(), terminalRunning: false, createdAt: now, updatedAt: now,
     }
   }
+  /** Author shown on the canvas for an agent's board changes. */
+  private agentName(resource: TerminalResource) { return resource.name === resource.agent ? resource.agent : `${resource.agent} · ${resource.name}` }
   private contextForResource(id: string) { return this.store.state.contexts.find(context => context.terminals.some(resource => resource.id === id)) }
   async invoke(action: string, args: Record<string, any> = {}): Promise<any> {
     switch (action) {
@@ -218,7 +256,7 @@ export class HubService extends EventEmitter {
       case 'deleteContext': {
         const id = String(args.id)
         const context = this.store.context(id)
-        for (const resource of context.terminals) { this.terminals.stop(resource.id).catch(() => {}); this.activity.forget(resource.id) }
+        for (const resource of context.terminals) { this.terminals.stop(resource.id).catch(() => {}); this.activity.forget(resource.id); this.outbox.delete(resource.id) }
         this.store.state.contexts = this.store.state.contexts.filter(c => c.id !== id)
         for (const [repo, selected] of Object.entries(this.store.state.selectedContexts ?? {})) {
           if (selected === id) {
@@ -235,7 +273,7 @@ export class HubService extends EventEmitter {
         if (context.terminals.length <= 1) throw new Error('A Session must keep at least one terminal. Add another terminal before removing this one.')
         this.terminals.stop(resource.id).catch(() => {})
         context.terminals = context.terminals.filter(item => item.id !== resource.id)
-        this.activity.forget(resource.id)
+        this.activity.forget(resource.id); this.outbox.delete(resource.id)
         context.updatedAt = new Date().toISOString(); this.flush(); return null
       }
       case 'terminalOpen': {
@@ -247,7 +285,7 @@ export class HubService extends EventEmitter {
           // The Session id lets board tools resolve the working Task on every
           // call, so a Task handed to an already-running agent is never stale.
           const boardEnv: Record<string, string> = {
-            ...themeEnv, AGENT_HUB_REPO: resource.repo, AGENT_HUB_SESSION_ID: context.id, AGENT_HUB_TERMINAL_ID: resource.id,
+            ...themeEnv, AGENT_HUB_REPO: resource.repo, AGENT_HUB_SESSION_ID: context.id, AGENT_HUB_TERMINAL_ID: resource.id, AGENT_HUB_AGENT_NAME: this.agentName(resource),
             AGENT_HUB_BOARD_RUNTIME: process.execPath, ...(this.boardCliPath ? { AGENT_HUB_BOARD_CLI: this.boardCliPath } : {}),
             ...(this.boardBin ? { PATH: `${this.boardBin}${delimiter}${agentEnvironment().PATH}` } : {}),
           }
@@ -258,7 +296,7 @@ export class HubService extends EventEmitter {
             let hookUrl: string | undefined
             if (provider) { try { hookUrl = await this.events.urlFor(resource.id) } catch { /* state falls back to screen signals */ } }
             const plan = launchPlan(provider, profile?.args ?? [], {
-              repo: resource.repo, sessionId: context.id, hookUrl, resumeId: resource.conversationId,
+              repo: resource.repo, sessionId: context.id, terminalId: resource.id, agentName: this.agentName(resource), hookUrl, resumeId: resource.conversationId,
               board: this.boardCliPath ? { runtime: process.execPath, cli: this.boardCliPath } : undefined,
             })
             if (profile) profile = { ...profile, args: plan.args }
@@ -340,6 +378,23 @@ export class HubService extends EventEmitter {
       case 'dictation:stop': return this.dictation.stop()
       case 'dictation:cancel': this.dictation.cancel(); return null
       case 'board:briefing': return this.taskBriefing(this.repo(args.repo), String(args.id))
+      case 'board:answer': {
+        const repo = this.repo(args.repo), id = String(args.id)
+        const before = this.boardStore.query(repo, { type: 'read', id }) as BoardNote | null
+        const question = before?.question
+        const note = this.boardStore.apply(repo, { type: 'answerQuestion', id, answer: String(args.answer ?? '') }) as BoardNote
+        let delivery: 'sent' | 'queued' | 'none' = 'none'
+        if (question?.terminalId) {
+          try { this.store.resource(question.terminalId); delivery = this.deliver(question.terminalId, `Answer to your question on Task ${id} ("${question.text}"):\n\n${String(args.answer).trim()}`) }
+          catch { /* the asking terminal was deleted; the answer stays in the Task log */ }
+        }
+        return { note, delivery }
+      }
+      case 'terminal:deliver': {
+        const resource = this.store.resource(String(args.id))
+        if (resource.terminalKind === 'shell') throw new Error('Choose an agent terminal, or copy the text into a shell.')
+        return this.deliver(resource.id, String(args.text ?? ''))
+      }
       case 'board:handoff': return this.boardBriefing(this.repo(args.repo), String(args.sessionId))
       case 'preferences': {
         let themeChanged = false

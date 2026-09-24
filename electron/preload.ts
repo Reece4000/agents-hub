@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld('agentHub', {
   onBoard: (listener: (value: unknown) => void) => { const h = (_event: unknown, value: unknown) => listener(value); ipcRenderer.on('agent-hub:board', h); return () => ipcRenderer.removeListener('agent-hub:board', h) },
   onTerminal: (listener: (value: unknown) => void) => { const h = (_event: unknown, value: unknown) => listener(value); ipcRenderer.on('agent-hub:terminal', h); return () => ipcRenderer.removeListener('agent-hub:terminal', h) },
   onFocusTerminal: (listener: (id: string) => void) => { const h = (_event: unknown, id: string) => listener(id); ipcRenderer.on('agent-hub:focus-terminal', h); return () => ipcRenderer.removeListener('agent-hub:focus-terminal', h) },
+  onFocusNote: (listener: (target: { repo: string; id: string }) => void) => { const h = (_event: unknown, target: { repo: string; id: string }) => listener(target); ipcRenderer.on('agent-hub:focus-note', h); return () => ipcRenderer.removeListener('agent-hub:focus-note', h) },
   terminalInput: (id:string,data:string) => ipcRenderer.send('agent-hub:terminal-input',id,data),
   terminalResize: (id:string,cols:number,rows:number) => ipcRenderer.send('agent-hub:terminal-resize',id,cols,rows),
   subscribe: (listener: (state: unknown) => void) => {

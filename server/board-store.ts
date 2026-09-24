@@ -2,7 +2,7 @@ import { createHash, randomBytes, randomUUID as cryptoRandomUUID } from 'node:cr
 import { EventEmitter } from 'node:events'
 import { accessSync, constants, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, watch, writeFileSync, type FSWatcher } from 'node:fs'
 import { basename, join, resolve, sep } from 'node:path'
-import type { BoardCommand, BoardImage, BoardLink, BoardNote, BoardPosition, BoardQuery, BoardSection, BoardSnapshot, Evidence, NoteKind, TaskState } from '../shared/board'
+import type { ProgressEntry, TaskQuestion, BoardCommand, BoardImage, BoardLink, BoardNote, BoardPosition, BoardQuery, BoardSection, BoardSnapshot, Evidence, NoteKind, TaskState } from '../shared/board'
 import { withMissingPositions } from '../shared/board-layout'
 
 const idPattern = /^(?:AH-[A-F0-9]{8}|[A-Z]{2}-[A-F0-9]{12})$/
@@ -16,6 +16,9 @@ const states: TaskState[] = ['open', 'working', 'blocked', 'done']
 const linkKinds = ['relates_to', 'depends_on', 'learned_from']
 const newId = (prefix: 'AH' | 'SC') => `${prefix}-${randomBytes(6).toString('hex').toUpperCase()}`
 const isLink = (value: any): value is BoardLink => value && idPattern.test(value.to) && linkKinds.includes(value.kind)
+const LOG_LIMIT = 200
+const logList = (value: unknown): ProgressEntry[] => Array.isArray(value) ? value.filter(v => v && typeof v.text === 'string' && v.text.trim()).slice(-LOG_LIMIT).map(v => ({ at: text(v.at, 40) || now(), actor: text(v.actor, 100) || 'agent', text: text(v.text, 2000) })) : []
+const questionValue = (value: any): TaskQuestion | undefined => value && typeof value.text === 'string' && value.text.trim() ? { text: text(value.text, 2000), askedBy: text(value.askedBy, 100) || 'agent', askedAt: text(value.askedAt, 40) || now(), ...(list(value.options, 8).length ? { options: list(value.options, 8) } : {}), ...(typeof value.terminalId === 'string' && /^[\w-]{1,120}$/.test(value.terminalId) ? { terminalId: value.terminalId } : {}) } : undefined
 const evidenceList = (value: unknown): Evidence[] => Array.isArray(value) ? value.slice(0, 30).filter(v => v && typeof v.path === 'string' && v.path.trim()).map(v => ({ path: text(v.path, 500), ...(v.detail ? { detail: text(v.detail, 500) } : {}) })) : []
 const imageId = /^[a-f0-9-]{36}$/
 const imageTypes: Record<string, { extension: string; valid: (data: Buffer) => boolean }> = {
@@ -37,8 +40,8 @@ interface CompletionJournal { command: Extract<BoardCommand, { type: 'completeTa
 /** Generated agent guide at `.agents-hub/README.md`. Earlier generated
  *  versions (by content hash) are upgraded in place; a guide someone edited
  *  is left alone. */
-const BOARD_GUIDE = "# Agent Hub board\n\nThe Tasks canvas is shared repo memory. Read `.agents-hub/notes/*.md` for tasks, notes, and codebase context. Each note has JSON metadata between `---` lines and a Markdown body. `.agents-hub/canvas.json` holds only spatial layout.\n\nIn an Agent Hub terminal the board is available two ways:\n\n- MCP tools named `board_*` (Claude Code and Codex terminals are configured automatically).\n- The `agent-hub-board` command: `agent-hub-board summary`, then `search`, `read`, or `related` with one JSON argument, e.g. `agent-hub-board search '{\"kind\":\"context\",\"text\":\"database\"}'`.\n\nStart with `board_summary`. Its `activeTask` is the Task your Session is working on; read it, search for related Context notes, and keep its status current. Mutations take the `expectedRevision` from a fresh read; read again if another writer changed a note.\n\nOn completion, record the outcome and checked acceptance criteria with `board_complete_task` (`agent-hub-board complete-task`), capturing one concise, evidence-backed codebase fact in a Context note. Give a no-learning reason only when nothing durable was learned. Without the board tools, read these Markdown files directly and leave edits to an Agent Hub terminal.\n\nOld `.agents-hub/tickets/*.json` files are preserved as migration sources. Edit the new note files for current Tasks.\n"
-const LEGACY_GUIDES = new Set(['d418fcfb1107feab0dc9f50f86a26a19b0d7a919a96b3c699bcc5bc92f6c13a8'])
+const BOARD_GUIDE = "# Agent Hub board\n\nThe Tasks canvas is shared repo memory. Read `.agents-hub/notes/*.md` for tasks, notes, and codebase context. Each note has JSON metadata between `---` lines and a Markdown body. `.agents-hub/canvas.json` holds only spatial layout.\n\nIn an Agent Hub terminal the board is available two ways:\n\n- MCP tools named `board_*` (Claude Code and Codex terminals are configured automatically).\n- The `agent-hub-board` command: `agent-hub-board summary`, then `search`, `read`, or `related` with one JSON argument, e.g. `agent-hub-board search '{\"kind\":\"context\",\"text\":\"database\"}'`.\n\nStart with `board_summary`. Its `activeTask` is the Task your Session is working on; read it, search for related Context notes, and keep its status current. While you work:\n\n- `board_log_progress` (`agent-hub-board log \"\u2026\"`) adds a line to the Task's timeline on the person's canvas. Log meaningful steps, not every action.\n- `board_ask` (`agent-hub-board ask \"\u2026\"`) puts a question on the Task's card when you need a decision. End your turn after asking; the answer is typed into your terminal.\n- `board_create_note` splits work into subtasks (`parentId`) or records a note; `board_link_notes` relates notes; `board_attach_image` adds a screenshot.\n\n`board_update_task` and `board_complete_task` take the `expectedRevision` from a fresh read; read again if another writer changed a note.\n\nOn completion, record the outcome and checked acceptance criteria with `board_complete_task` (`agent-hub-board complete-task`), capturing one concise, evidence-backed codebase fact in a Context note. Give a no-learning reason only when nothing durable was learned. Without the board tools, read these Markdown files directly and leave edits to an Agent Hub terminal.\n\nOld `.agents-hub/tickets/*.json` files are preserved as migration sources. Edit the new note files for current Tasks.\n"
+const LEGACY_GUIDES = new Set(['a68f753f44377687f07b77cad8a5805b54d6065d432a026aa0440bbdb7b57b72', 'd418fcfb1107feab0dc9f50f86a26a19b0d7a919a96b3c699bcc5bc92f6c13a8'])
 
 export interface BoardStoreOptions { passive?: boolean }
 
@@ -174,6 +177,11 @@ export class BoardStore extends EventEmitter {
       note.captureState = ['pending', 'captured', 'none', 'legacy_unknown'].includes(value.captureState) ? value.captureState : 'pending'
       note.noLearningReason = text(value.noLearningReason, 2000)
       if (value.legacyStatus) note.legacyStatus = text(value.legacyStatus, 40)
+      if (idPattern.test(value.parentId ?? '')) note.parentId = value.parentId
+      const log = logList(value.log)
+      if (log.length) note.log = log
+      const question = questionValue(value.question)
+      if (question) note.question = question
     } else if (note.kind === 'context') {
       note.subject = text(value.subject, 200)
       note.evidence = evidenceList(value.evidence)
@@ -181,6 +189,27 @@ export class BoardStore extends EventEmitter {
       note.verifiedAt = text(value.verifiedAt, 40)
     }
     return note
+  }
+  /** Three-way merge for a stale edit: the note at `baseRevision` (kept in
+   *  history) is what the editor started from. Fields the editor left alone
+   *  keep their newer value, so an agent's progress entries, links, or
+   *  question do not conflict with a person's edit. Only a field both sides
+   *  changed differently is a conflict. */
+  private mergePatch(repo: string, current: BoardNote, baseRevision: string, patch: Partial<BoardNote>): Partial<BoardNote> {
+    const conflict = new Error('This note changed on disk. Reload before saving.')
+    const path = join(this.paths(repo).history, current.id, `${baseRevision}.md`)
+    if (!/^[a-f0-9]{64}$/.test(baseRevision) || !existsSync(path)) throw conflict
+    const base = this.decode(path, false) as unknown as Record<string, unknown>
+    const theirs = current as unknown as Record<string, unknown>
+    const same = (a: unknown, b: unknown) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null)
+    const merged: Record<string, unknown> = {}
+    for (const [key, value] of Object.entries(patch)) {
+      if (key === 'updatedBy') { merged[key] = value; continue }
+      if (same(value, base[key])) continue
+      if (!same(theirs[key], base[key]) && !same(theirs[key], value)) throw conflict
+      merged[key] = value
+    }
+    return merged as Partial<BoardNote>
   }
   private readNote(repo: string, id: string) {
     const path = this.notePath(repo, id)
@@ -383,15 +412,17 @@ export class BoardStore extends EventEmitter {
       const title = text(command.note.title, 160)
       if (!title) throw new Error('Add a title to the note.')
       const stamp = now()
-      const note: BoardNote = { id, kind: command.note.kind, title, body: text(command.note.body, 60000), createdAt: stamp, updatedAt: stamp, updatedBy: text(command.note.updatedBy, 100) || 'person', revision: '', sectionId: text(command.note.sectionId, 100), links: Array.isArray(command.note.links) ? command.note.links.filter(isLink).slice(0, 80) : [], images: imagesList(command.note.images), userSource: { title, body: text(command.note.body, 60000) }, ...(command.note.kind === 'task' ? { status: command.note.status && states.includes(command.note.status) ? command.note.status : 'open' as const, acceptance: list(command.note.acceptance), sessionId: text(command.note.sessionId, 120), agent: text(command.note.agent, 120), captureState: 'pending' as const } : {}), ...(command.note.kind === 'context' ? { subject: text(command.note.subject, 200) || title, evidence: evidenceList(command.note.evidence), sourceTaskIds: list(command.note.sourceTaskIds), verifiedAt: text(command.note.verifiedAt, 40) } : {}) }
+      const note: BoardNote = { id, kind: command.note.kind, title, body: text(command.note.body, 60000), createdAt: stamp, updatedAt: stamp, updatedBy: text(command.note.updatedBy, 100) || 'person', revision: '', sectionId: text(command.note.sectionId, 100), links: Array.isArray(command.note.links) ? command.note.links.filter(isLink).slice(0, 80) : [], images: imagesList(command.note.images), userSource: { title, body: text(command.note.body, 60000) }, ...(command.note.kind === 'task' ? { status: command.note.status && states.includes(command.note.status) ? command.note.status : 'open' as const, acceptance: list(command.note.acceptance), sessionId: text(command.note.sessionId, 120), agent: text(command.note.agent, 120), captureState: 'pending' as const, ...(command.note.parentId && idPattern.test(command.note.parentId) ? { parentId: command.note.parentId } : {}) } : {}), ...(command.note.kind === 'context' ? { subject: text(command.note.subject, 200) || title, evidence: evidenceList(command.note.evidence), sourceTaskIds: list(command.note.sourceTaskIds), verifiedAt: text(command.note.verifiedAt, 40) } : {}) }
       result = this.saveNote(root, note)
       const layout = this.readLayout(root)
-      layout.positions[id] = validPosition(command.position) ? command.position : { x: 120 + (Object.keys(layout.positions).length % 3) * 315, y: 120 + Math.floor(Object.keys(layout.positions).length / 3) * 220 }
+      // A linked note without a position is placed beside what it links to
+      // on the next snapshot; anything else gets the next grid slot now.
+      if (validPosition(command.position)) layout.positions[id] = command.position
+      else if (!note.links.length) layout.positions[id] = { x: 120 + (Object.keys(layout.positions).length % 3) * 315, y: 120 + Math.floor(Object.keys(layout.positions).length / 3) * 220 }
       this.saveLayout(root, layout)
     } else if (command.type === 'updateNote') {
       const current = this.readNote(root, command.id)
-      if (current.revision !== command.expectedRevision) throw new Error('This note changed on disk. Reload before saving.')
-      const patch = command.patch
+      const patch = current.revision === command.expectedRevision ? command.patch : this.mergePatch(root, current, command.expectedRevision, command.patch)
       if (patch.sectionId && !this.readLayout(root).sections.some(section => section.id === patch.sectionId)) throw new Error('Section no longer exists.')
       const kind = patch.kind && kinds.includes(patch.kind) ? patch.kind : current.kind
       const next: BoardNote = { ...current, kind, title: patch.title === undefined ? current.title : text(patch.title, 160), body: patch.body === undefined ? current.body : text(patch.body, 60000), sectionId: patch.sectionId === undefined ? current.sectionId : text(patch.sectionId, 100), links: patch.links === undefined ? current.links : patch.links.filter(isLink).slice(0, 80), images: patch.images === undefined ? current.images : imagesList(patch.images), updatedAt: now(), updatedBy: text(patch.updatedBy, 100) || 'person' }
@@ -411,7 +442,7 @@ export class BoardStore extends EventEmitter {
         next.sourceTaskIds = patch.sourceTaskIds === undefined ? current.sourceTaskIds ?? [] : list(patch.sourceTaskIds)
         next.verifiedAt = patch.verifiedAt === undefined ? current.verifiedAt ?? '' : text(patch.verifiedAt, 40)
       }
-      result = this.saveNote(root, next, command.expectedRevision)
+      result = this.saveNote(root, next, current.revision)
     } else if (command.type === 'moveNote') {
       if (!validPosition(command.position)) throw new Error('Invalid position.')
       const note = this.readNote(root, command.id)
@@ -467,6 +498,38 @@ export class BoardStore extends EventEmitter {
       if (!existsSync(source) || existsSync(target)) throw new Error('This note cannot be restored.')
       renameSync(source, target)
       result = this.readNote(root, command.id)
+    } else if (command.type === 'appendLog') {
+      const note = this.readNote(root, command.id)
+      const entry = { at: now(), actor: text(command.actor, 100) || 'agent', text: text(command.text, 2000) }
+      if (!entry.text) throw new Error('Describe the progress to log.')
+      result = this.saveNote(root, { ...note, log: [...(note.log ?? []), entry].slice(-LOG_LIMIT), updatedAt: entry.at, updatedBy: entry.actor }, note.revision)
+    } else if (command.type === 'addLink') {
+      const note = this.readNote(root, command.id)
+      const kind = command.kind && linkKinds.includes(command.kind) ? command.kind : 'relates_to'
+      if (command.to === note.id) throw new Error('A note cannot link to itself.')
+      this.readNote(root, command.to)
+      result = note.links.some(link => link.to === command.to && link.kind === kind) ? note
+        : this.saveNote(root, { ...note, links: [...note.links, { to: command.to, kind }].slice(0, 80), updatedAt: now(), updatedBy: text(command.actor, 100) || 'agent' }, note.revision)
+    } else if (command.type === 'askQuestion') {
+      const note = this.readNote(root, command.id)
+      if (note.kind !== 'task') throw new Error('Questions belong to a Task.')
+      if (note.status === 'done') throw new Error('This Task is already done.')
+      const question = questionValue({ text: command.text, options: command.options, askedBy: command.actor, askedAt: now(), terminalId: command.terminalId })
+      if (!question) throw new Error('Write the question to ask.')
+      result = this.saveNote(root, { ...note, question, status: 'blocked', log: [...(note.log ?? []), { at: question.askedAt, actor: question.askedBy, text: `Asked: ${question.text}` }].slice(-LOG_LIMIT), updatedAt: question.askedAt, updatedBy: question.askedBy }, note.revision)
+    } else if (command.type === 'answerQuestion') {
+      const note = this.readNote(root, command.id)
+      if (!note.question) throw new Error('This Task has no open question.')
+      const answer = text(command.answer, 4000)
+      if (!answer) throw new Error('Write an answer.')
+      const { question: _answered, ...rest } = note
+      const stamp = now()
+      result = this.saveNote(root, { ...rest, status: note.status === 'blocked' ? 'working' : note.status, log: [...(note.log ?? []), { at: stamp, actor: 'person', text: `Answered: ${answer}` }].slice(-LOG_LIMIT), updatedAt: stamp, updatedBy: 'person' }, note.revision)
+    } else if (command.type === 'attachImage') {
+      const note = this.readNote(root, command.id)
+      const images = imagesList([...(note.images ?? []), command.image])
+      if (images.length === (note.images ?? []).length) throw new Error('That image could not be attached.')
+      result = this.saveNote(root, { ...note, images, updatedAt: now(), updatedBy: text(command.actor, 100) || 'agent' }, note.revision)
     } else if (command.type === 'completeTask') result = this.complete(root, command)
     this.publish(root)
     return result

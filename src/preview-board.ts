@@ -1,6 +1,6 @@
 import type { BoardCommand, BoardNote, BoardQuery, BoardSection, BoardSnapshot } from '../shared/board'
 
-const key = 'agent-hub-board-preview-v1'
+const key = 'agent-hub-board-preview-v2'
 const stamp = new Date().toISOString()
 const id = () => `AH-${crypto.randomUUID().replaceAll('-', '').slice(0, 12).toUpperCase()}`
 const revision = () => crypto.randomUUID()
@@ -21,7 +21,9 @@ const initial: BoardSnapshot = {
   notes: [
     note({ id: 'AH-A17C42D0', kind: 'task', title: 'Make the board agent-aware', body: 'Agents should be able to discover, search and update the entire board from their coding session.', status: 'working', acceptance: ['Query notes by kind and subject', 'A second session can retrieve a prior learning'], agent: 'Codex', sessionId: 'preview-1', captureState: 'pending', sectionId: 'SC-1A2B3C4D5E6F', links: [{ to: 'AH-70C39A4E', kind: 'relates_to' }] }),
     note({ id: 'AH-5D2B8F31', kind: 'note', title: 'What should a session remember?', body: 'A session is a place to work. The board is the memory that survives across sessions. Keep those identities separate.', sectionId: 'SC-1A2B3C4D5E6F' }),
-    note({ id: 'AH-8F11C603', kind: 'task', title: 'Polish canvas navigation', body: 'Keep a large map usable: pan, zoom, search, and focus any note.', status: 'open', acceptance: ['Keyboard can reach every note', 'Search focuses offscreen results'], captureState: 'pending', sectionId: 'SC-1A2B3C4D5E6F' }),
+    note({ id: 'AH-8F11C603', kind: 'task', title: 'Polish canvas navigation', body: 'Keep a large map usable: pan, zoom, search, and focus any note.', status: 'blocked', sessionId: 'preview-2',
+      question: { text: 'Should the camera animate when search jumps to a note, or cut instantly?', options: ['Animate', 'Cut instantly'], askedBy: 'Claude Code', askedAt: new Date(Date.now() - 4 * 60_000).toISOString(), terminalId: 'preview-2-claude' },
+      log: [{ at: new Date(Date.now() - 20 * 60_000).toISOString(), actor: 'Claude Code', text: 'Mapped zoom and pan handlers in BoardCanvas.tsx' }, { at: new Date(Date.now() - 4 * 60_000).toISOString(), actor: 'Claude Code', text: 'Asked: Should the camera animate when search jumps to a note, or cut instantly?' }], acceptance: ['Keyboard can reach every note', 'Search focuses offscreen results'], captureState: 'pending', sectionId: 'SC-1A2B3C4D5E6F' }),
     note({ id: 'AH-70C39A4E', kind: 'context', title: 'Board storage contract', body: 'Notes live in repo-local Markdown files. Geometry is stored separately so moving cards never overwrites their content.', subject: 'board storage', evidence: [{ path: 'server/board-store.ts', detail: 'note and layout writes' }], sourceTaskIds: ['AH-A17C42D0'], verifiedAt: stamp, sectionId: 'SC-7A8B9C0D1E2F' }),
     note({ id: 'AH-274A13BE', kind: 'context', title: 'Terminal ownership', body: 'Each Session groups independently running agent and shell terminals. Provider conversations remain inside their own CLI.', subject: 'terminal ownership', evidence: [{ path: 'server/service.ts', detail: 'terminalOpen' }], sourceTaskIds: [], verifiedAt: stamp, sectionId: 'SC-7A8B9C0D1E2F' }),
     note({ id: 'AH-B320D9A5', kind: 'note', title: 'Open question · evidence', body: 'How should the interface show that a context fact has become stale after code changes?', sectionId: 'SC-7A8B9C0D1E2F' }),
@@ -78,6 +80,15 @@ export function previewBoard() {
       data.notes.push(current); data.positions[current.id] = { x: 120, y: 120 }
       trashed[repo] = trashed[repo].filter(item => item.id !== command.id)
       result = current
+    }
+    else if (command.type === 'appendLog' || command.type === 'askQuestion' || command.type === 'answerQuestion') {
+      const current = find(repo, command.id)
+      if (!current) throw new Error('Note no longer exists.')
+      const at = new Date().toISOString()
+      if (command.type === 'appendLog') current.log = [...(current.log ?? []), { at, actor: command.actor, text: command.text }]
+      else if (command.type === 'askQuestion') Object.assign(current, { status: 'blocked', question: { text: command.text, options: command.options, askedBy: command.actor, askedAt: at }, log: [...(current.log ?? []), { at, actor: command.actor, text: `Asked: ${command.text}` }] })
+      else { delete current.question; Object.assign(current, { status: current.status === 'blocked' ? 'working' : current.status, log: [...(current.log ?? []), { at, actor: 'person', text: `Answered: ${command.answer}` }] }) }
+      Object.assign(current, { revision: revision(), updatedAt: at }); result = current
     }
     else if (command.type === 'completeTask') {
       const task = find(repo, command.id)

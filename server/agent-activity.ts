@@ -22,6 +22,7 @@ export function describeTool(tool: string, input: Json = {}): string {
   if (tool === 'WebFetch' || tool === 'WebSearch') return 'Browsing the web'
   if (tool === 'Task' || tool === 'Agent') return text(input.description) ? `Delegating: ${clip(text(input.description), 60)}` : 'Delegating to a subagent'
   if (tool === 'TodoWrite') return 'Planning'
+  if (tool === 'ToolSearch') return 'Finding tools'
   if (/^mcp__agent[-_]hub__/.test(tool)) return 'Updating the board'
   if (tool.startsWith('mcp__')) return `Using ${tool.split('__').slice(1).join(' ')}`
   return tool ? `Using ${tool}` : 'Working'

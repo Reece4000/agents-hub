@@ -98,6 +98,7 @@ test('Claude launches with hooks, the board MCP server, and a resumable conversa
   const settings = JSON.parse(fresh.args[fresh.args.indexOf('--settings') + 1])
   assert.deepEqual(Object.keys(settings.hooks).sort(), ['Notification', 'PermissionRequest', 'PreToolUse', 'SessionStart', 'Stop', 'UserPromptSubmit'])
   assert.equal(settings.hooks.Stop[0].hooks[0].command, HOOK_COMMAND)
+  assert.deepEqual(settings.permissions, { allow: ['mcp__agent-hub'] }, 'only the board server is pre-approved')
   assert.deepEqual(fresh.args.slice(-2), ['--session-id', fresh.conversationId])
   assert.equal(fresh.env.AGENT_HUB_HOOK_URL, 'http://127.0.0.1:1/event?terminal=t&token=x')
   const resumed = launchPlan('claude', [], { repo: '/repo', sessionId: 'ctx-1', resumeId: 'abc-123' })
@@ -142,12 +143,12 @@ test('agent board reads do not rewrite repo instruction files, and report the Se
     const task = app.apply(repo, { type: 'createNote', note: { kind: 'task', title: 'Wire hooks', status: 'working', sessionId: 'ctx-7' } }) as { id: string }
     app.close()
     writeFileSync(join(repo, 'CLAUDE.md'), 'user content only\n')
-    const agent = new BoardAgent(repo, undefined, 'ctx-7')
+    const agent = new BoardAgent(repo, undefined, { sessionId: 'ctx-7' })
     try {
       const summary = agent.call('board_summary') as { activeTask: { id: string } | null }
       assert.equal(summary.activeTask?.id, task.id)
       assert.equal(readFileSync(join(repo, 'CLAUDE.md'), 'utf8'), 'user content only\n', 'agent reads never touch instruction files')
-      assert.equal((new BoardAgent(repo, undefined, 'other').call('board_summary') as { activeTask: unknown }).activeTask, null)
+      assert.equal((new BoardAgent(repo, undefined, { sessionId: 'other' }).call('board_summary') as { activeTask: unknown }).activeTask, null)
     } finally { agent.close() }
     assert.ok(existsSync(join(repo, '.agents-hub', 'README.md')))
     assert.match(readFileSync(join(repo, '.agents-hub', 'README.md'), 'utf8'), /agent-hub-board summary/)

@@ -6,7 +6,7 @@ import { preferredOrganizerModel, type OrganizerConfig } from '../shared/organiz
 // Browser-only preview. The desktop always uses the isolated Electron preload bridge.
 function previewBridge(): Bridge {
   const board = previewBoard()
-  const workspaceKey = 'agent-hub-preview-v6'
+  const workspaceKey = 'agent-hub-preview-v7'
   const ticketKey = 'agent-hub-tickets-v2'
   const empty = { html: '', text: '', attachments: [] }
   const repo = '/Projects/agent-hub'
@@ -19,6 +19,8 @@ function previewBridge(): Bridge {
     group('preview-2', 'backend', repo, [resource('preview-2-claude', 'preview-2', repo, 'Claude Code', 'Claude Code', 'custom')]),
     make('preview-3', 'research', '/Projects/website'),
   ] }
+  // One sample agent mid-task, so the canvas shows live status in the preview.
+  Object.assign(initial.contexts[0].terminals[0], { terminalRunning: true, activity: { state: 'working', detail: 'Editing board-store.ts', since: now, source: 'hooks' } })
   let state: Workspace = JSON.parse(localStorage.getItem(workspaceKey) || 'null') || initial
   if (state.version !== 2 || !Array.isArray(state.contexts)) state = initial
   const nowPast = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString()
@@ -124,6 +126,8 @@ function previewBridge(): Bridge {
         case 'board:load': return board.load(String(args.repo || state.selectedRepo)) as T
         case 'board:query': return board.query(String(args.repo || state.selectedRepo), args.query) as T
         case 'board:apply': return board.apply(String(args.repo || state.selectedRepo), args.command) as T
+        case 'board:answer': return { note: board.apply(String(args.repo || state.selectedRepo), { type: 'answerQuestion', id: String(args.id), answer: String(args.answer) }), delivery: 'none' } as T
+        case 'terminal:deliver': return 'queued' as T
         case 'board:image:add': {
           const id = crypto.randomUUID(), mime = String(args.mime)
           const extension = mime === 'image/jpeg' ? 'jpg' : mime.split('/')[1]

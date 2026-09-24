@@ -5,7 +5,7 @@ const write = (value: unknown) => process.stdout.write(`${JSON.stringify(value)}
 const args = process.argv.slice(2)
 const repo = process.env.AGENT_HUB_REPO || process.cwd()
 let agent: BoardAgent
-try { agent = new BoardAgent(repo, undefined, process.env.AGENT_HUB_SESSION_ID ?? '') }
+try { agent = new BoardAgent(repo, undefined, { sessionId: process.env.AGENT_HUB_SESSION_ID, terminalId: process.env.AGENT_HUB_TERMINAL_ID, actor: process.env.AGENT_HUB_AGENT_NAME }) }
 catch (error) { process.stderr.write(`${(error as Error).message}\n`); process.exit(1) }
 
 /** Answer with the client's protocol version when this server speaks it, else the newest one it does. */
@@ -42,16 +42,22 @@ if (args[0] === 'mcp') {
   })
   process.stdin.on('end', () => agent.close())
 } else {
-  const names: Record<string, string> = { summary: 'board_summary', search: 'board_search', read: 'board_read', related: 'board_related', 'update-task': 'board_update_task', 'upsert-context': 'board_upsert_context', 'complete-task': 'board_complete_task' }
+  const names: Record<string, string> = { summary: 'board_summary', search: 'board_search', read: 'board_read', related: 'board_related', log: 'board_log_progress', ask: 'board_ask', create: 'board_create_note', link: 'board_link_notes', attach: 'board_attach_image', 'update-task': 'board_update_task', 'upsert-context': 'board_upsert_context', 'complete-task': 'board_complete_task' }
   const action = names[args[0]]
   if (!action) {
-    process.stdout.write('Usage: board-cli <summary|search|read|related|update-task|upsert-context|complete-task|mcp> [JSON arguments]\nMutations require expectedRevision. Set AGENT_HUB_REPO to the repository root.\n')
+    process.stdout.write(`Usage: agent-hub-board <${Object.keys(names).join('|')}|mcp> [JSON arguments]\n  agent-hub-board log "Found the cause"     append to the active Task's progress\n  agent-hub-board ask "Keep the old API?"   ask the person; the answer is typed into this terminal\nupdate-task and complete-task need expectedRevision from a fresh read. Set AGENT_HUB_REPO to the repository root.\n`)
     agent.close()
   } else {
     try {
-      const input = args[1] ? JSON.parse(args[1]) : {}
-      if (['board_read', 'board_related'].includes(action) && typeof input === 'string') write(agent.call(action, { id: input }))
-      else write(agent.call(action, input))
+      // Plain-text shorthands: `read ID`, `log some text`, `ask a question`.
+      const raw = args.slice(1).join(' ')
+      let input: unknown
+      try { input = raw ? JSON.parse(raw) : {} } catch { input = raw }
+      const plain = typeof input === 'string'
+      if (plain && ['board_read', 'board_related'].includes(action)) write(agent.call(action, { id: input }))
+      else if (plain && action === 'board_log_progress') write(agent.call(action, { text: input }))
+      else if (plain && action === 'board_ask') write(agent.call(action, { question: input }))
+      else write(agent.call(action, input as Record<string, unknown>))
     } catch (error) { process.stderr.write(`${(error as Error).message}\n`); process.exitCode = 1 }
     finally { agent.close() }
   }

@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url'
 import { homedir } from 'node:os'
 import { HubService } from '../server/service'
 import type { AgentActivity, TerminalResource } from '../src/types'
+import type { BoardNote } from '../shared/board'
 
 let service: HubService
 let window: BrowserWindow | undefined
@@ -67,21 +68,31 @@ else {
     // Dock badge; a finished turn notifies only when the window is unfocused.
     const waiting = new Set<string>()
     const notices = new Set<Notification>()
-    const focusTerminal = (id: string) => { if (!window) create(); window?.show(); window?.focus(); window?.webContents.send('agent-hub:focus-terminal', id) }
+    const questions = new Map<string, number>()
+    const badge = () => app.setBadgeCount(waiting.size + [...questions.values()].reduce((sum, count) => sum + count, 0))
+    const bringForward = () => { if (!window) create(); window?.show(); window?.focus() }
+    const focusTerminal = (id: string) => { bringForward(); window?.webContents.send('agent-hub:focus-terminal', id) }
+    const notify = (options: Electron.NotificationConstructorOptions, onClick: () => void) => {
+      if (!Notification.isSupported()) return
+      const notice = new Notification(options)
+      // Hold a reference until the notification is dismissed so its click handler survives GC.
+      notices.add(notice)
+      notice.on('click', () => { notices.delete(notice); onClick() })
+      notice.on('close', () => notices.delete(notice))
+      notice.show()
+    }
+    service.on('questions', ({ repo, count }: { repo: string; count: number }) => { questions.set(repo, count); badge() })
+    service.on('question', ({ repo, note }: { repo: string; note: BoardNote }) => {
+      notify({ title: `${note.question?.askedBy ?? 'An agent'} asks about “${note.title}”`, body: note.question?.text ?? '' }, () => { bringForward(); window?.webContents.send('agent-hub:focus-note', { repo, id: note.id }) })
+    })
     service.on('activity', ({ resource, previous }: { resource: TerminalResource; previous?: AgentActivity }) => {
       const activity = resource.activity
       if (!activity) return
       if (activity.state === 'waiting') waiting.add(resource.id); else waiting.delete(resource.id)
-      app.setBadgeCount(waiting.size)
+      badge()
       const needsYou = activity.state === 'waiting' && previous?.state !== 'waiting'
       const finished = activity.state === 'idle' && previous?.state === 'working' && !window?.isFocused()
-      if ((!needsYou && !finished) || !Notification.isSupported()) return
-      const notice = new Notification({ title: needsYou ? `${resource.name} needs you` : `${resource.name} finished`, body: activity.detail, silent: finished })
-      // Hold a reference until the notification is dismissed so its click handler survives GC.
-      notices.add(notice)
-      notice.on('click', () => { notices.delete(notice); focusTerminal(resource.id) })
-      notice.on('close', () => notices.delete(notice))
-      notice.show()
+      if (needsYou || finished) notify({ title: needsYou ? `${resource.name} needs you` : `${resource.name} finished`, body: activity.detail, silent: finished }, () => focusTerminal(resource.id))
     })
     create()
     app.on('activate', () => { if (!window) create() })

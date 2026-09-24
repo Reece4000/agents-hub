@@ -156,13 +156,22 @@ function WorkspaceApp() {
       setBriefing({ sessionId, title: 'Board brief', text })
     } catch (error) { notify((error as Error).message) }
   }
-  const sendBriefing = () => {
-    if (!activeTerminal?.terminalRunning) { notify('Start an agent terminal before sending the task briefing.'); return }
+  // The briefing is typed in once the agent is idle, so it can be handed to
+  // an agent that is still finishing its previous turn.
+  const sendBriefing = async () => {
+    if (!activeTerminal || !briefing) return
     if (activeTerminal.terminalKind === 'shell') { notify('Choose an agent terminal, or copy the briefing to use in a shell.'); return }
-    if (!briefing) return
-    bridge.terminalInput?.(activeTerminal.id, `\x1b[200~${briefing.text}\x1b[201~\r`)
-    setBriefing(null)
+    try {
+      const delivery = await bridge.invoke<'sent' | 'queued'>('terminal:deliver', { id: activeTerminal.id, text: briefing.text })
+      if (delivery === 'queued') notify(`${activeTerminal.name} is busy. The briefing will be sent when it is idle.`)
+      setBriefing(null)
+    } catch (error) { notify((error as Error).message) }
   }
+  const [focusRequest, setFocusRequest] = useState<{ id: string; nonce: number } | null>(null)
+  useEffect(() => bridge.onFocusNote?.(target => {
+    setSelectedRepo(target.repo); setView('tasks')
+    setFocusRequest({ id: target.id, nonce: Date.now() })
+  }), [])
   const toggleAll = async (run: boolean) => {
     setBusy(true)
     try {
@@ -236,13 +245,13 @@ function WorkspaceApp() {
     {sidebar && <aside className="sidebar" aria-label="Folder browser"><FolderBrowser selected={repo} contexts={contexts} disabled={busy} onSelect={path => void selectRepo(path)} onNewContext={startContext} onError={notify} /><div className="sidebar-resize" role="separator" aria-orientation="vertical" aria-label="Resize folder browser" tabIndex={0} onPointerDown={(event: ReactPointerEvent<HTMLDivElement>) => { event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId); sideDrag.current = { startX: event.clientX, startW: sideWidth } }} onPointerMove={event => { const drag = sideDrag.current; if (drag) setSideWidth(clampSide(drag.startW + event.clientX - drag.startX)) }} onPointerUp={() => { sideDrag.current = null; try { localStorage.setItem('agent-hub-sidebar-width', String(sideWidth)) } catch {} }} onPointerCancel={() => { sideDrag.current = null }} onKeyDown={(event: ReactKeyboardEvent<HTMLDivElement>) => { if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') setSideWidth(value => clampSide(value + (event.key === 'ArrowRight' ? 12 : -12))) }} /></aside>}
     <main className="workspace">
       {data.error && <div className="connection-error"><span>{data.error}</span><button onClick={() => void bridge.invoke<Bootstrap>('bootstrap').then(setData)}>Reconnect</button></div>}
-      <BoardCanvas repo={repo} sessions={repoContexts} isVisible={view === 'tasks'} onError={notify} onWork={(id, task) => void workOnTask(id, task)} />{view === 'terminals' && <section className="contexts-view" aria-label="Agent Sessions">
+      <BoardCanvas repo={repo} sessions={repoContexts} isVisible={view === 'tasks'} focusRequest={focusRequest} onError={notify} onWork={(id, task) => void workOnTask(id, task)} />{view === 'terminals' && <section className="contexts-view" aria-label="Agent Sessions">
         <div className="sessions-strip"><div className="context-tabs" role="tablist" aria-label={`Sessions in ${folderName(repo)}`}>
           {repoContexts.map(context => <button role="tab" aria-selected={activeContext?.id === context.id} className={`context-tab${activeContext?.id === context.id ? ' active' : ''}`} key={context.id} onClick={() => void selectContext(context)} title={`${context.name} · ${context.terminals.length} terminals · ${STATE_LABELS[mostUrgent(context.terminals)]}`}><span className={`status-dot state-${mostUrgent(context.terminals)}`} /><span className="context-tab-name">{context.name}</span><small>{context.terminals.length}</small></button>)}
           <button className="icon-button context-tab-add" aria-label="New Session" title="New Session" disabled={busy || !repo} onClick={() => startContext(repo)}><Plus size={15} /></button>
         </div><div className="contexts-actions">{activeContext && <button className="small-button" title="Give any running agent the shared board context" onClick={() => void openBoardBrief(activeContext.id)}><BookOpen size={13} />Board brief</button>}{runningCount > 0 && <button className="small-button" disabled={busy} onClick={() => void toggleAll(false)}><Square size={13} />Stop all</button>}{runningCount < allTerminals.length && allTerminals.length > 0 && <button className="small-button" disabled={busy} onClick={() => void toggleAll(true)}><Play size={13} />Start all</button>}{activeContext && <button className="small-button" onClick={() => { setRenameInput(activeContext.name); setRenaming(true) }}><Pencil size={13} />Rename</button>}{activeContext && <button className={`small-button${deleteContextId === activeContext.id ? ' danger-armed' : ''}`} onClick={() => void removeContext(activeContext)}><Trash2 size={13} />{deleteContextId === activeContext.id ? 'Delete Session?' : 'Delete'}</button>}</div></div>
         {activeContext ? <>
-          {briefing?.sessionId === activeContext.id && <div className="session-briefing"><div><strong>{briefing.title === 'Board brief' ? briefing.title : `Task: ${briefing.title}`}</strong><span>{briefing.title === 'Board brief' ? 'Send this context to any running agent, or copy it for another CLI.' : 'Send the task and linked context to the active agent.'}</span></div><button className="small-button" onClick={() => void navigator.clipboard.writeText(briefing.text).then(() => notify('Briefing copied.')).catch(error => notify((error as Error).message))}>Copy briefing</button><button className="primary-button" disabled={!activeTerminal?.terminalRunning || activeTerminal.terminalKind === 'shell'} onClick={sendBriefing}>Send to agent</button><button className="icon-button" aria-label="Dismiss briefing" onClick={() => setBriefing(null)}><X size={14} /></button></div>}
+          {briefing?.sessionId === activeContext.id && <div className="session-briefing"><div><strong>{briefing.title === 'Board brief' ? briefing.title : `Task: ${briefing.title}`}</strong><span>{briefing.title === 'Board brief' ? 'Send this context to any running agent, or copy it for another CLI.' : 'Send the task and linked context to the active agent.'}</span></div><button className="small-button" onClick={() => void navigator.clipboard.writeText(briefing.text).then(() => notify('Briefing copied.')).catch(error => notify((error as Error).message))}>Copy briefing</button><button className="primary-button" disabled={!activeTerminal || activeTerminal.terminalKind === 'shell'} onClick={() => void sendBriefing()}>Send to agent</button><button className="icon-button" aria-label="Dismiss briefing" onClick={() => setBriefing(null)}><X size={14} /></button></div>}
           <div className="terminal-tabs" role="tablist" aria-label={`Terminals in ${activeContext.name}`}>
             {activeContext.terminals.map(terminal => <div key={terminal.id} className={`terminal-tab${activeTerminal?.id === terminal.id ? ' active' : ''}`}>
               <button role="tab" aria-selected={activeTerminal?.id === terminal.id} className="terminal-tab-main" onClick={() => { if (activeTerminal) void flushTerminalDraft(activeTerminal.id); setActiveTerminals(current => ({ ...current, [activeContext.id]: terminal.id })) }} title={`${terminal.agent} · ${terminalStatus(terminal)}`}><span className={`status-dot state-${terminalState(terminal)}`} /><span>{terminal.name}</span><small className={`terminal-status state-${terminalState(terminal)}`}>{terminalStatus(terminal)}</small></button>
