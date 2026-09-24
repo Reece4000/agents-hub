@@ -11,7 +11,7 @@ export const IDLE_EXIT_MS = 5000
  *  app is closed. It serves the supervisor protocol on a Unix socket to any
  *  number of app windows and exits once nothing runs and nobody is
  *  connected. */
-export async function runSupervisor(socketPath: string, { idleMs = IDLE_EXIT_MS, onExit = () => process.exit(0) } = {}): Promise<{ close: () => void }> {
+export async function runSupervisor(socketPath: string, { idleMs = IDLE_EXIT_MS, onExit = (): void => process.exit(0) }: { idleMs?: number; onExit?: () => void } = {}): Promise<{ close: () => void }> {
   if (existsSync(socketPath)) {
     // A socket file with nobody listening is left over from a crash.
     const alive = await new Promise<boolean>(resolve => { const probe = connect(socketPath, () => { probe.end(); resolve(true) }); probe.on('error', () => resolve(false)) })
