@@ -2,7 +2,7 @@ import { useEditor, EditorContent } from '@tiptap/react'
 import StarterKit from '@tiptap/starter-kit'
 import Placeholder from '@tiptap/extension-placeholder'
 import { useEffect, useRef, useState } from 'react'
-import { ArrowUp, Paperclip, X, File, Loader2 } from 'lucide-react'
+import { ArrowUp, Paperclip, X, File, Loader2, Mic, Square } from 'lucide-react'
 import { bridge } from './bridge'
 import { buildTerminalPrompt, bracketedPaste } from './terminalPrompt'
 import type { TerminalResource, Attachment, Draft } from './types'
@@ -22,6 +22,7 @@ export default function TerminalComposer({ session, onError, patch }: {
   const draftRef = useRef(draft)
   const [sending, setSending] = useState(false)
   const [uploading, setUploading] = useState(false)
+  const [dictation, setDictation] = useState<'idle' | 'starting' | 'recording' | 'processing'>('idle')
   const fileInput = useRef<HTMLInputElement>(null)
   const composer = useRef<HTMLElement>(null)
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
@@ -102,6 +103,26 @@ export default function TerminalComposer({ session, onError, patch }: {
     try { const attachments = await bridge.invoke<Attachment[]>('clipboard'); if (attachments.length) append(attachments); else onError('No image or file was found on the clipboard.') }
     catch (e) { onError((e as Error).message) } finally { setUploading(false) }
   }
+  // Speak a prompt: the on-device transcript is added to the draft to
+  // review before sending.
+  const toggleDictation = async () => {
+    if (dictation === 'recording') {
+      setDictation('processing')
+      try {
+        const text = (await bridge.invoke<string>('dictation:stop')).trim()
+        if (text) editor?.chain().focus('end').insertContent(`${editor.isEmpty ? '' : ' '}${text}`).run()
+        else onError('No speech was detected.')
+      } catch (e) { onError((e as Error).message) } finally { setDictation('idle') }
+      return
+    }
+    if (dictation !== 'idle') return
+    setDictation('starting')
+    try { await bridge.invoke('dictation:start'); setDictation('recording') }
+    catch (e) { setDictation('idle'); onError((e as Error).message) }
+  }
+  const recording = useRef(false)
+  recording.current = dictation === 'recording' || dictation === 'starting'
+  useEffect(() => () => { if (recording.current) void bridge.invoke('dictation:cancel').catch(() => {}) }, [])
   submitRef.current = async () => {
     if (sending || uploading) return
     if (!bridge.terminalInput) { onError('Rich prompts need the desktop app.'); return }
@@ -134,7 +155,8 @@ export default function TerminalComposer({ session, onError, patch }: {
     <div className="composer-tools">
       <input ref={fileInput} type="file" multiple hidden onChange={e => { addFilesRef.current(Array.from(e.target.files ?? [])); e.target.value = '' }} />
       <button className="icon-button" aria-label="Attach files" title="Attach files or images" disabled={uploading || sending} onClick={() => fileInput.current?.click()}>{uploading ? <Loader2 size={17} className="spin" /> : <Paperclip size={17} />}</button>
-      <span className="enter-hint">↵ sends · ⇧↵ newline</span>
+      {bridge.desktop && <button className={`icon-button dictate-button${dictation === 'recording' ? ' recording' : ''}`} aria-label={dictation === 'recording' ? 'Stop dictating' : 'Dictate a prompt'} title={dictation === 'recording' ? 'Stop and insert the transcript' : 'Dictate a prompt'} disabled={dictation === 'starting' || dictation === 'processing' || sending} onClick={() => void toggleDictation()}>{dictation === 'recording' ? <Square size={14} /> : dictation === 'idle' ? <Mic size={16} /> : <Loader2 size={16} className="spin" />}</button>}
+      <span className="enter-hint">{dictation === 'recording' ? 'Listening… click ■ to insert' : '↵ sends · ⇧↵ newline'}</span>
       <button className="send-button" aria-label="Send prompt to terminal" disabled={sending || uploading || !session.terminalRunning || (!draft.text.trim() && !draft.attachments.length)} onClick={() => submitRef.current()}>{sending ? <Loader2 size={16} className="spin" /> : <ArrowUp size={19} />}</button>
     </div>
   </footer>

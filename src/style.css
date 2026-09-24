@@ -195,3 +195,5 @@ span.folder-chevron{display:inline-block}
 .palette-empty{padding:18px;text-align:center;color:var(--muted);font-size:12px}
 .palette-foot{display:flex;gap:14px;padding:8px 14px;border-top:1px solid var(--border);color:var(--muted);font-size:10px}
 .palette-foot span{display:flex;align-items:center;gap:5px}
+
+.dictate-button.recording{color:var(--error);background:var(--error-bg);animation:breathe 1.2s ease-in-out infinite}
