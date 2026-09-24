@@ -107,3 +107,15 @@ test('dispatch assigns a Task to an agent terminal, starts it, and queues the br
     await assert.rejects(service.invoke('board:dispatch', { repo: dir, taskId: task.id, terminalId: shell.id }), /shell cannot receive/)
   } finally { service.close(); rmSync(dir, { recursive: true, force: true }) }
 })
+
+test('a context pack gives an agent each selected note\'s essentials', async () => {
+  const { contextPack } = await import('../src/contextPack')
+  const base = { createdAt: '', updatedAt: '', updatedBy: 'person', revision: '', sectionId: '', links: [], body: '' }
+  const text = contextPack([
+    { ...base, id: 'AH-000000000001', kind: 'task', title: 'Ship drawer', status: 'working', body: 'Dock terminals', acceptance: ['Opens with ⌘J'], question: { text: 'Left or right?', askedBy: 'Codex', askedAt: '' } },
+    { ...base, id: 'AH-000000000002', kind: 'context', title: 'Drawer width', body: 'Persisted per viewer', evidence: [{ path: 'src/AgentDrawer.tsx' }] },
+  ])
+  assert.match(text, /^Context from the Agent Hub board: 2 notes/)
+  assert.match(text, /### Task AH-000000000001: Ship drawer \(working\)\nDock terminals\nAcceptance:\n- Opens with ⌘J\nOpen question: Left or right\?/)
+  assert.match(text, /### Codebase context AH-000000000002: Drawer width\nPersisted per viewer\nEvidence: src\/AgentDrawer.tsx/)
+})

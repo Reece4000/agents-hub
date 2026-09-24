@@ -7,6 +7,7 @@ import OrganizerPanel from './OrganizerPanel'
 import { zoomAtCursor } from './viewport'
 import type { RepoContext, TerminalResource, Viewport } from './types'
 import { mostUrgent, terminalState, terminalStatus } from './agentState'
+import { contextPack } from './contextPack'
 import type { BoardCommand, BoardNote, BoardPosition, BoardQuery, BoardSection, BoardSnapshot, NoteKind, ProgressEntry, TaskState } from '../shared/board'
 import { cardWidth, cardHeight, withMissingPositions } from '../shared/board-layout'
 import './board.css'
@@ -38,6 +39,8 @@ const liveAgent = (note: BoardNote, sessions: RepoContext[]) => {
 }
 /** Drag payload type for handing a task to an agent puck's terminal. */
 const AGENT_DRAG = 'application/x-agent-hub-terminal'
+/** Drag payload type for a selection of notes sent to an agent as context. */
+const PACK_DRAG = 'application/x-agent-hub-pack'
 const initials = (name: string) => { const words = name.trim().split(/\s+/).filter(Boolean); return (words.length > 1 ? words.map(word => word[0]).join('') : name.slice(0, 2)).slice(0, 2).toUpperCase() || '·' }
 const canTake = (note: BoardNote) => note.kind === 'task' && note.status !== 'done'
 /** Whether a context note's evidence changed after it was verified. */
@@ -49,7 +52,7 @@ const ago = (value: string) => {
 
 type Menu = { x: number; y: number; world: BoardPosition; target?: string; section?: string }
 type Capture = { kind: NoteKind; position: BoardPosition; x: number; y: number }
-type Drag = { type: 'pan' | 'note' | 'section' | 'resize'; id?: string; startX: number; startY: number; startViewport: Viewport; startPosition?: BoardPosition; startSection?: BoardSection; originalPositions?: Record<string, BoardPosition>; moved: boolean }
+type Drag = { type: 'pan' | 'note' | 'section' | 'resize' | 'lasso'; id?: string; group?: string[]; startX: number; startY: number; startViewport: Viewport; startPosition?: BoardPosition; startSection?: BoardSection; originalPositions?: Record<string, BoardPosition>; moved: boolean }
 
 export default function BoardCanvas({ repo, sessions, isVisible = true, focusRequest, createRequest, onDispatch, onOpenTerminal, onNewAgent, onError }: { repo: string; sessions: RepoContext[]; isVisible?: boolean; focusRequest?: { id: string; nonce: number } | null; createRequest?: { kind: NoteKind; nonce: number } | null; onDispatch: (taskId: string, terminalId: string) => void; onOpenTerminal: (terminalId: string) => void; onNewAgent: () => void; onError: (message: string) => void }) {
   const agents = useMemo(() => sessions.flatMap(session => session.terminals.filter(terminal => terminal.terminalKind !== 'shell')), [sessions])
@@ -194,6 +197,34 @@ export default function BoardCanvas({ repo, sessions, isVisible = true, focusReq
     flyTo(current => ({ ...current, x: (surfaceSize.width - editorWidth) / 2 - position.x * current.zoom, y: (surfaceSize.height - editorHeight) / 2 - position.y * current.zoom }))
     setFocusTitleId(null)
   }
+  // Multi-selection ("picked" cards) for group moves and context packs.
+  const [picked, setPicked] = useState<Set<string>>(() => new Set())
+  const pickedRef = useRef(picked); pickedRef.current = picked
+  const [lasso, setLasso] = useState<{ x: number; y: number; width: number; height: number } | null>(null)
+  const lassoRef = useRef(lasso); lassoRef.current = lasso
+  const [draggingPack, setDraggingPack] = useState(false)
+  const [packTarget, setPackTarget] = useState<string | null>(null)
+  const pickedNotes = useMemo(() => snapshot.notes.filter(note => picked.has(note.id)), [snapshot.notes, picked])
+  const pack = useMemo(() => pickedNotes.length ? contextPack(pickedNotes) : '', [pickedNotes])
+  const [packMenu, setPackMenu] = useState(false)
+  const sendPack = async (terminalId: string) => {
+    setPackMenu(false)
+    const agent = agents.find(item => item.id === terminalId)
+    try {
+      const delivery = await bridge.invoke<'sent' | 'queued'>('terminal:deliver', { id: terminalId, text: pack })
+      onError(`${pickedNotes.length} note${pickedNotes.length === 1 ? '' : 's'} ${delivery === 'queued' ? 'queued for' : 'sent to'} ${agent?.name ?? 'the agent'}.`)
+      onOpenTerminal(terminalId)
+    } catch (error) { onError((error as Error).message) }
+  }
+  const taskFromPicks = async () => {
+    const xs = pickedNotes.map(note => positionsRef.current[note.id]?.x ?? 0), ys = pickedNotes.map(note => positionsRef.current[note.id]?.y ?? 0)
+    const created = await apply({ type: 'createNote', position: { x: Math.max(...xs) + cardWidth + 60, y: Math.round(ys.reduce((a, b) => a + b, 0) / Math.max(1, ys.length)) }, note: {
+      kind: 'task', title: 'New task', links: pickedNotes.map(note => ({ to: note.id, kind: 'relates_to' as const })),
+      body: `Built from:\n${pickedNotes.map(note => `- ${note.id} ${note.title}`).join('\n')}`,
+    } }) as BoardNote | null
+    if (created) { setPicked(new Set()); setFocusTitleId(created.id); void openNote(created.id) }
+  }
+  const togglePick = (id: string) => setPicked(current => { const next = new Set(current); if (next.has(id)) next.delete(id); else next.add(id); return next })
   // Re-check context evidence against git shortly after the board settles.
   useEffect(() => {
     if (!repo || loading) return
@@ -277,9 +308,11 @@ export default function BoardCanvas({ repo, sessions, isVisible = true, focusReq
   }
   const startDrag = (event: ReactPointerEvent, type: Drag['type'], id?: string) => {
     cancelAnimationFrame(flight.current)
-    if (event.button !== 0 || (snapshot.readOnly && type !== 'pan')) return
+    if (event.button !== 0 || (snapshot.readOnly && type !== 'pan' && type !== 'lasso')) return
     event.preventDefault(); event.stopPropagation(); setMenu(null)
-    drag.current = { type, id, startX: event.clientX, startY: event.clientY, startViewport: viewportRef.current, startPosition: id ? positionsRef.current[id] : undefined, startSection: type === 'section' || type === 'resize' ? sectionsRef.current.find(s => s.id === id) : undefined, originalPositions: type === 'section' ? { ...positionsRef.current } : undefined, moved: false }
+    if (type === 'note' && id && event.shiftKey) { suppressOpen.current = id; togglePick(id); return }
+    const group = type === 'note' && id && pickedRef.current.has(id) && pickedRef.current.size > 1 ? [...pickedRef.current] : undefined
+    drag.current = { group, type, id, startX: event.clientX, startY: event.clientY, startViewport: viewportRef.current, startPosition: id ? positionsRef.current[id] : undefined, startSection: type === 'section' || type === 'resize' ? sectionsRef.current.find(s => s.id === id) : undefined, originalPositions: type === 'section' || group ? { ...positionsRef.current } : undefined, moved: false }
   }
   useEffect(() => {
     const move = (event: PointerEvent) => {
@@ -288,6 +321,14 @@ export default function BoardCanvas({ repo, sessions, isVisible = true, focusReq
       const dx = event.clientX - item.startX, dy = event.clientY - item.startY
       if (Math.abs(dx) + Math.abs(dy) > 3) item.moved = true
       if (item.type === 'pan') setViewport({ ...item.startViewport, x: item.startViewport.x + dx, y: item.startViewport.y + dy })
+      else if (item.type === 'lasso') {
+        const rect = surface.current?.getBoundingClientRect()
+        if (rect) setLasso({ x: Math.min(item.startX, event.clientX) - rect.left, y: Math.min(item.startY, event.clientY) - rect.top, width: Math.abs(dx), height: Math.abs(dy) })
+      }
+      else if (item.type === 'note' && item.group) {
+        const zx = dx / item.startViewport.zoom, zy = dy / item.startViewport.zoom
+        setPositions(prev => { const next = { ...prev }; for (const id of item.group!) { const start = item.originalPositions?.[id]; if (start) next[id] = { x: Math.round(start.x + zx), y: Math.round(start.y + zy) } } return next })
+      }
       else if (item.type === 'note' && item.id && item.startPosition) setPositions(prev => ({ ...prev, [item.id!]: { x: Math.round(item.startPosition!.x + dx / item.startViewport.zoom), y: Math.round(item.startPosition!.y + dy / item.startViewport.zoom) } }))
       else if (item.type === 'section' && item.id && item.startSection) {
         const sx = Math.round(dx / item.startViewport.zoom), sy = Math.round(dy / item.startViewport.zoom)
@@ -298,6 +339,28 @@ export default function BoardCanvas({ repo, sessions, isVisible = true, focusReq
     }
     const up = () => {
       const item = drag.current; drag.current = null
+      if (item?.type === 'lasso') {
+        // Pick every card the lasso touches, adding to the current picks.
+        const box = lassoRef.current, view = viewportRef.current
+        setLasso(null)
+        if (!box || box.width + box.height < 6) return
+        const left = (box.x - view.x) / view.zoom, top = (box.y - view.y) / view.zoom, right = left + box.width / view.zoom, bottom = top + box.height / view.zoom
+        const hits = Object.entries(positionsRef.current).filter(([id, p]) => p.x < right && p.x + cardWidth > left && p.y < bottom && p.y + cardHeight > top && snapshot.notes.some(note => note.id === id)).map(([id]) => id)
+        setPicked(current => new Set([...current, ...hits]))
+        return
+      }
+      if (item?.type === 'pan' && !item.moved) { setPicked(current => current.size ? new Set() : current); return }
+      if (item?.type === 'note' && item.group && item.moved) {
+        suppressOpen.current = item.id ?? null
+        for (const id of item.group) {
+          const position = positionsRef.current[id], note = snapshot.notes.find(n => n.id === id)
+          if (!position || !note) continue
+          const center = { x: position.x + cardWidth / 2, y: position.y + cardHeight / 2 }
+          const target = sectionsRef.current.find(s => !s.collapsed && center.x >= s.x && center.x <= s.x + s.width && center.y >= s.y && center.y <= s.y + s.height)
+          void apply({ type: 'moveNote', id, position, sectionId: target?.id ?? '', expectedRevision: note.revision })
+        }
+        return
+      }
       if (!item?.id) return
       if (!item.moved && item.type === 'note') { setFocusTitleId(item.id); void openNote(item.id); return }
       if (!item.moved) return
@@ -322,7 +385,7 @@ export default function BoardCanvas({ repo, sessions, isVisible = true, focusReq
     const key = (event: KeyboardEvent) => {
       if (!isVisible) return
       if (event.key === 'Escape') {
-        setMenu(null); setSearchOpen(false); setFilterOpen(false); setShowTrash(false); setLinkFrom(null); setLinkCursor(null)
+        setMenu(null); setSearchOpen(false); setFilterOpen(false); setShowTrash(false); setLinkFrom(null); setLinkCursor(null); setPicked(current => current.size ? new Set() : current)
         if (selectedId && !(event.target instanceof Element && event.target.closest('select'))) {
           const commit = beforeSwitch.current
           void (commit ? commit() : Promise.resolve(true)).then(ok => { if (ok) closeNote(selectedId) })
@@ -388,7 +451,7 @@ export default function BoardCanvas({ repo, sessions, isVisible = true, focusReq
     </header>
     {!!snapshot.errors.length && <div className="kb-warning" role="alert"><CircleHelp size={14} /><span>{snapshot.errors.slice(0, 2).join(' · ')}</span><button onClick={() => void refresh()}>Refresh</button></div>}
     {loadError && <div className="kb-warning" role="alert"><CircleHelp size={14} /><span>Could not load board: {loadError}</span><button onClick={() => void refresh().catch(error => setLoadError((error as Error).message))}>Retry</button></div>}
-    <div className="kb-main" style={organizing ? { pointerEvents: 'none' } : undefined}><div className="kb-viewport" ref={surface} onWheel={onWheel} onPointerDown={event => { if (event.target === event.currentTarget || (event.target as HTMLElement).classList.contains('kb-world')) startDrag(event, 'pan') }} onDoubleClick={event => { if (event.target === event.currentTarget || (event.target as HTMLElement).classList.contains('kb-world')) void create('note', worldAt(event.clientX, event.clientY)) }} onContextMenu={event => { event.preventDefault(); setMenu({ x: event.clientX, y: event.clientY, world: worldAt(event.clientX, event.clientY) }) }}>
+    <div className="kb-main" style={organizing ? { pointerEvents: 'none' } : undefined}><div className="kb-viewport" ref={surface} onWheel={onWheel} onPointerDown={event => { if (event.target === event.currentTarget || (event.target as HTMLElement).classList.contains('kb-world')) startDrag(event, event.shiftKey ? 'lasso' : 'pan') }} onDoubleClick={event => { if (event.target === event.currentTarget || (event.target as HTMLElement).classList.contains('kb-world')) void create('note', worldAt(event.clientX, event.clientY)) }} onContextMenu={event => { event.preventDefault(); setMenu({ x: event.clientX, y: event.clientY, world: worldAt(event.clientX, event.clientY) }) }}>
       <div className="kb-grid" style={{ backgroundPosition: `${viewport.x}px ${viewport.y}px`, backgroundSize: `${26 * viewport.zoom}px ${26 * viewport.zoom}px` }} />
       <div className="kb-world" style={{ transform: `translate(${viewport.x}px,${viewport.y}px) scale(${viewport.zoom})` }}>
         {sections.map(section => <div key={section.id} className={`kb-section${section.collapsed ? ' collapsed' : ''}`} style={{ left: section.x, top: section.y, width: section.width, height: section.collapsed ? 52 : section.height }} onContextMenu={event => { event.preventDefault(); event.stopPropagation(); setMenu({ x: event.clientX, y: event.clientY, world: worldAt(event.clientX, event.clientY), section: section.id }) }}><div className="kb-section-head"><button className="kb-section-grip" aria-label={`Move ${section.title} section`} onPointerDown={event => startDrag(event, 'section', section.id)}><Grip size={14} /></button>{renamingSection === section.id ? <input autoFocus value={sectionName} onChange={event => setSectionName(event.target.value)} onBlur={() => { void apply({ type: 'updateSection', id: section.id, patch: { title: sectionName } }); setRenamingSection(null) }} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); if (event.key === 'Escape') setRenamingSection(null) }} /> : <button className="kb-section-title" onDoubleClick={() => { setRenamingSection(section.id); setSectionName(section.title) }} onClick={() => void apply({ type: 'updateSection', id: section.id, patch: { collapsed: !section.collapsed } })}>{section.collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}{section.title}</button>}<span>{snapshot.notes.filter(n => n.sectionId === section.id).length}</span><button className="kb-section-menu" aria-label={`${section.title} actions`} onClick={event => { const rect = event.currentTarget.getBoundingClientRect(); setMenu({ x: rect.left, y: rect.bottom, world: { x: section.x, y: section.y }, section: section.id }) }}><MoreHorizontal size={16} /></button></div>{!section.collapsed && <button className="kb-section-resize" aria-label={`Resize ${section.title} section`} onPointerDown={event => startDrag(event, 'resize', section.id)} />}</div>)}
@@ -423,7 +486,7 @@ export default function BoardCanvas({ repo, sessions, isVisible = true, focusReq
               if (suppressOpen.current === note.id) { suppressOpen.current = null; event.preventDefault(); event.stopPropagation(); return }
               if (linkFrom && linkFrom !== note.id) { event.preventDefault(); event.stopPropagation(); void connectNotes(linkFrom, note.id) }
             }}
-            className={`kb-card kind-${note.kind}${editing ? ' editing selected' : ''}${dimmed ? ' dimmed' : ''}${linkFrom && linkFrom !== note.id ? ' link-target' : ''}${note.question ? ' asking' : ''}${live ? ` live-${live.state}` : ''}${draggingAgent && canTake(note) ? ' drop-ready' : ''}${dropTarget === note.id ? ' drop-target' : ''}${fresh}${stale ? ' is-stale' : ''}`}
+            className={`kb-card kind-${note.kind}${editing ? ' editing selected' : ''}${dimmed ? ' dimmed' : ''}${linkFrom && linkFrom !== note.id ? ' link-target' : ''}${note.question ? ' asking' : ''}${live ? ` live-${live.state}` : ''}${draggingAgent && canTake(note) ? ' drop-ready' : ''}${dropTarget === note.id ? ' drop-target' : ''}${fresh}${stale ? ' is-stale' : ''}${picked.has(note.id) ? ' picked' : ''}`}
             onDragOver={event => { if (!canTake(note) || !event.dataTransfer.types.includes(AGENT_DRAG)) return; event.preventDefault(); event.dataTransfer.dropEffect = 'link'; if (dropTarget !== note.id) setDropTarget(note.id) }}
             onDragLeave={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDropTarget(current => current === note.id ? null : current) }}
             onDrop={event => { const terminalId = event.dataTransfer.getData(AGENT_DRAG); setDropTarget(null); setDraggingAgent(null); if (terminalId && canTake(note)) { event.preventDefault(); onDispatch(note.id, terminalId) } }}
@@ -445,14 +508,26 @@ export default function BoardCanvas({ repo, sessions, isVisible = true, focusReq
       </div>
       {!loading && !loadError && !snapshot.notes.length && <div className="kb-empty"><h3>No notes yet</h3><p>Write an idea. You can turn it into a task later.</p><div><button className="kb-add" disabled={snapshot.readOnly} onClick={() => void create('note', centerWorld())}><Plus size={15} /> Add note</button></div><small>N: note · double-click: note · right-click: more</small></div>}
       {capture && <QuickCapture key={`${capture.kind}:${capture.position.x}:${capture.position.y}`} capture={capture} onSave={text => saveCapture(capture, text)} onClose={() => setCapture(null)} />}
+      {lasso && <div className="kb-lasso" style={{ left: lasso.x, top: lasso.y, width: lasso.width, height: lasso.height }} />}
+      {pickedNotes.length > 0 && <div className="kb-selection" role="toolbar" aria-label="Selected notes">
+        <span className="kb-pack-handle" draggable title="Drag onto an agent to send these notes as context"
+          onDragStart={event => { event.dataTransfer.setData(PACK_DRAG, [...picked].join(',')); event.dataTransfer.effectAllowed = 'copy'; setDraggingPack(true) }}
+          onDragEnd={() => { setDraggingPack(false); setPackTarget(null) }}><Grip size={13} /><strong>{pickedNotes.length} selected</strong><small>~{Math.ceil(pack.length / 4).toLocaleString()} tokens</small></span>
+        <div className="kb-hand"><button className="kb-work" aria-expanded={packMenu} onClick={() => setPackMenu(value => !value)}><Command size={13} /> Send to agent</button>{packMenu && <div className="kb-hand-menu kb-hand-menu-down" role="menu">{agents.map(agent => <button role="menuitem" key={agent.id} onClick={() => void sendPack(agent.id)}><span className={`status-dot state-${terminalState(agent)}`} /><strong>{agent.name}</strong><small>{terminalStatus(agent)}</small></button>)}{!agents.length && <button role="menuitem" className="kb-hand-new" onClick={() => { setPackMenu(false); onNewAgent() }}><Plus size={13} /> New agent…</button>}</div>}</div>
+        <button onClick={() => void taskFromPicks()} disabled={snapshot.readOnly}><Plus size={13} /> Task from these</button>
+        <button className="kb-selection-clear" aria-label="Clear selection" title="Clear selection (Esc)" onClick={() => setPicked(new Set())}><X size={14} /></button>
+      </div>}
       <div className="kb-agents" aria-label="Agents: drag onto a task to hand it over">
-        {agents.map(agent => { const state = terminalState(agent); return <button key={agent.id} className={`kb-puck state-${state}`} draggable title={`${agent.name} · ${terminalStatus(agent)}\nDrag onto a task to hand it over · click to show`}
+        {agents.map(agent => { const state = terminalState(agent); return <button key={agent.id} className={`kb-puck state-${state}${draggingPack ? ' pack-ready' : ''}${packTarget === agent.id ? ' pack-target' : ''}`} draggable
+          onDragOver={event => { if (!event.dataTransfer.types.includes(PACK_DRAG)) return; event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; setPackTarget(agent.id) }}
+          onDragLeave={() => setPackTarget(current => current === agent.id ? null : current)}
+          onDrop={event => { if (!event.dataTransfer.types.includes(PACK_DRAG)) return; event.preventDefault(); setPackTarget(null); setDraggingPack(false); void sendPack(agent.id) }} title={`${agent.name} · ${terminalStatus(agent)}\nDrag onto a task to hand it over · click to show`}
           onDragStart={event => { event.dataTransfer.setData(AGENT_DRAG, agent.id); event.dataTransfer.effectAllowed = 'link'; setDraggingAgent(agent.id) }}
           onDragEnd={() => { setDraggingAgent(null); setDropTarget(null) }}
           onClick={() => onOpenTerminal(agent.id)}><span className="kb-puck-face">{initials(agent.name)}</span><span className="kb-puck-name">{agent.name}</span></button> })}
         <button className="kb-puck kb-puck-new" title="Start a new agent" onClick={onNewAgent}><span className="kb-puck-face"><Plus size={14} /></span><span className="kb-puck-name">Agent</span></button>
       </div>
-      <div className="kb-canvas-hint"><span>{linkFrom ? 'CHOOSE A NOTE TO LINK · ESC TO CANCEL' : 'DOUBLE-CLICK: NOTE · N: NOTE · T: TASK · DRAG: PAN'}</span></div>
+      <div className="kb-canvas-hint"><span>{linkFrom ? 'CHOOSE A NOTE TO LINK · ESC TO CANCEL' : 'DOUBLE-CLICK: NOTE · N/T: NOTE/TASK · SHIFT-DRAG: SELECT · ⌘K: JUMP'}</span></div>
       <div className="kb-zoom"><button aria-label="Zoom out" onClick={() => zoomBy(-.15)}><Minus size={15} /></button><span>{Math.round(viewport.zoom * 100)}%</span><button aria-label="Zoom in" onClick={() => zoomBy(.15)}><Plus size={15} /></button><button aria-label="Fit canvas" onClick={fitView}><Focus size={15} /></button></div>
     </div>
       {showTrash && <aside className="kb-trash"><header><div><h3>Trash</h3></div><button aria-label="Close trash" onClick={() => setShowTrash(false)}><X size={16} /></button></header>{trash.length ? trash.map(note => <div key={note.id}><strong>{note.title}</strong><span>{kindLabel[note.kind]}</span><button onClick={() => void apply({ type: 'restoreNote', id: note.id }).then(() => loadTrash())}>Restore</button></div>) : <p>No notes in trash.</p>}</aside>}
