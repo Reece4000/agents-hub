@@ -169,3 +169,28 @@
 .kb-progress strong{font-weight:600;color:var(--secondary);white-space:nowrap}
 .kb-progress span{color:var(--text);min-width:0;overflow-wrap:anywhere}
 .kb-progress>button{align-self:flex-start;font-size:10px;color:var(--accent);background:none;border:0;padding:0}
+
+/* Agent pucks: drag one onto a task to hand it over. */
+.kb-agents{position:absolute;left:14px;bottom:44px;display:flex;gap:10px;align-items:flex-end;z-index:30;padding:8px 10px;border-radius:14px;background:color-mix(in srgb,var(--surface) 88%,transparent);border:1px solid var(--border);box-shadow:0 8px 24px rgba(0,0,0,.18);backdrop-filter:blur(6px);max-width:calc(100% - 200px);overflow-x:auto}
+.kb-puck{display:flex;flex-direction:column;align-items:center;gap:4px;background:none;border:0;padding:0;cursor:grab;color:var(--secondary);min-width:44px}
+.kb-puck:active{cursor:grabbing}
+.kb-puck-face{position:relative;width:34px;height:34px;border-radius:50%;display:grid;place-items:center;font-size:11px;font-weight:700;letter-spacing:.02em;color:var(--text);background:var(--button);box-shadow:0 0 0 2px var(--border);transition:transform .15s ease,box-shadow .2s ease}
+.kb-puck:hover .kb-puck-face{transform:translateY(-2px) scale(1.05)}
+.kb-puck-name{font-size:9px;max-width:64px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.kb-puck.state-working .kb-puck-face{background:var(--accent-soft);box-shadow:0 0 0 2px var(--accent);animation:puck-pulse 1.8s ease-in-out infinite}
+.kb-puck.state-waiting .kb-puck-face{background:var(--warning-bg);box-shadow:0 0 0 2px var(--warning);animation:puck-pulse 1s ease-in-out infinite;color:var(--warning)}
+.kb-puck.state-idle .kb-puck-face,.kb-puck.state-starting .kb-puck-face{box-shadow:0 0 0 2px color-mix(in srgb,var(--accent) 45%,var(--border))}
+.kb-puck.state-stopped .kb-puck-face{opacity:.55;box-shadow:none;outline:1px dashed var(--muted);outline-offset:1px}
+.kb-puck-new{cursor:pointer}
+.kb-puck-new .kb-puck-face{background:transparent;box-shadow:none;outline:1px dashed var(--muted);color:var(--muted)}
+@keyframes puck-pulse{0%,100%{filter:brightness(1)}50%{filter:brightness(1.25)}}
+.kb-card.drop-ready{outline:1px dashed color-mix(in srgb,var(--accent) 60%,transparent);outline-offset:3px}
+.kb-card.drop-target{outline:2px solid var(--accent);outline-offset:3px;transform:scale(1.03);box-shadow:0 14px 34px rgba(0,0,0,.28)}
+button.kb-card-live{border:0;cursor:pointer;text-align:left;font:inherit;font-size:10px;width:calc(100% - 24px)}
+button.kb-card-live:hover{filter:brightness(1.12)}
+.kb-hand{position:relative}
+.kb-hand-menu{position:absolute;bottom:calc(100% + 6px);left:0;min-width:240px;max-width:320px;display:flex;flex-direction:column;padding:4px;border-radius:9px;background:var(--surface);border:1px solid var(--border);box-shadow:0 12px 30px rgba(0,0,0,.28);z-index:20}
+.kb-hand-menu button{display:grid;grid-template-columns:10px auto 1fr;align-items:center;gap:8px;padding:7px 8px;border-radius:6px;border:0;background:none;color:var(--text);text-align:left;font-size:11px}
+.kb-hand-menu button:hover{background:var(--hover)}
+.kb-hand-menu small{color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.kb-hand-menu .kb-hand-new{grid-template-columns:auto 1fr;color:var(--accent)}

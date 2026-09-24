@@ -88,3 +88,22 @@ test('answers and briefings wait in an outbox until the agent is idle', async ()
     assert.deepEqual(writes, ['\x1b[200~Answer: drop it\x1b[201~', '\r'])
   } finally { service.close(); rmSync(dir, { recursive: true, force: true }) }
 })
+
+test('dispatch assigns a Task to an agent terminal, starts it, and queues the briefing', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'agent-hub-dispatch-'))
+  const service = new HubService(dir, dir)
+  let opened = 0
+  service.terminals.open = (async () => { opened++; return { data: '', seq: 0, cols: 90, rows: 28, running: true } }) as typeof service.terminals.open
+  try {
+    service.boardStore.load(dir)
+    const context = await service.invoke('newContext', { repo: dir, name: 'backend', terminalKind: 'custom', terminalName: 'Reviewer', profile: { label: 'Env', executable: '/usr/bin/env', args: [] } })
+    const terminal = context.terminals[0]
+    const task = service.boardStore.apply(dir, { type: 'createNote', note: { kind: 'task', title: 'Review the drawer' } }) as BoardNote
+    const result = await service.invoke('board:dispatch', { repo: dir, taskId: task.id, terminalId: terminal.id })
+    assert.equal(opened, 1, 'a stopped agent is started')
+    assert.equal(result.delivery, 'queued', 'the briefing waits for the agent to be idle')
+    assert.deepEqual([result.note.sessionId, result.note.status, result.note.agent], [context.id, 'working', 'Env · Reviewer'])
+    const shell = await service.invoke('newTerminal', { contextId: context.id, terminalKind: 'shell' })
+    await assert.rejects(service.invoke('board:dispatch', { repo: dir, taskId: task.id, terminalId: shell.id }), /shell cannot receive/)
+  } finally { service.close(); rmSync(dir, { recursive: true, force: true }) }
+})

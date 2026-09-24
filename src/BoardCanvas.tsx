@@ -5,8 +5,8 @@ import remarkGfm from 'remark-gfm'
 import { bridge } from './bridge'
 import OrganizerPanel from './OrganizerPanel'
 import { zoomAtCursor } from './viewport'
-import type { RepoContext, Viewport } from './types'
-import { mostUrgent, terminalStatus } from './agentState'
+import type { RepoContext, TerminalResource, Viewport } from './types'
+import { mostUrgent, terminalState, terminalStatus } from './agentState'
 import type { BoardCommand, BoardNote, BoardPosition, BoardQuery, BoardSection, BoardSnapshot, NoteKind, ProgressEntry, TaskState } from '../shared/board'
 import { cardWidth, cardHeight, withMissingPositions } from '../shared/board-layout'
 import './board.css'
@@ -34,8 +34,12 @@ const liveAgent = (note: BoardNote, sessions: RepoContext[]) => {
   if (!running.length) return null
   const state = mostUrgent(running)
   const terminal = running.find(item => (item.activity?.state ?? 'idle') === state) ?? running[0]
-  return { state, name: terminal.name, status: terminalStatus(terminal) }
+  return { state, name: terminal.name, status: terminalStatus(terminal), terminalId: terminal.id }
 }
+/** Drag payload type for handing a task to an agent puck's terminal. */
+const AGENT_DRAG = 'application/x-agent-hub-terminal'
+const initials = (name: string) => { const words = name.trim().split(/\s+/).filter(Boolean); return (words.length > 1 ? words.map(word => word[0]).join('') : name.slice(0, 2)).slice(0, 2).toUpperCase() || '·' }
+const canTake = (note: BoardNote) => note.kind === 'task' && note.status !== 'done'
 const ago = (value: string) => {
   const seconds = Math.max(0, (Date.now() - new Date(value).getTime()) / 1000)
   return seconds < 60 ? 'now' : seconds < 3600 ? `${Math.floor(seconds / 60)}m` : seconds < 86400 ? `${Math.floor(seconds / 3600)}h` : date(value)
@@ -45,7 +49,10 @@ type Menu = { x: number; y: number; world: BoardPosition; target?: string; secti
 type Capture = { kind: NoteKind; position: BoardPosition; x: number; y: number }
 type Drag = { type: 'pan' | 'note' | 'section' | 'resize'; id?: string; startX: number; startY: number; startViewport: Viewport; startPosition?: BoardPosition; startSection?: BoardSection; originalPositions?: Record<string, BoardPosition>; moved: boolean }
 
-export default function BoardCanvas({ repo, sessions, isVisible = true, focusRequest, onWork, onError }: { repo: string; sessions: RepoContext[]; isVisible?: boolean; focusRequest?: { id: string; nonce: number } | null; onWork: (sessionId: string, task: BoardNote) => void; onError: (message: string) => void }) {
+export default function BoardCanvas({ repo, sessions, isVisible = true, focusRequest, onDispatch, onOpenTerminal, onNewAgent, onError }: { repo: string; sessions: RepoContext[]; isVisible?: boolean; focusRequest?: { id: string; nonce: number } | null; onDispatch: (taskId: string, terminalId: string) => void; onOpenTerminal: (terminalId: string) => void; onNewAgent: () => void; onError: (message: string) => void }) {
+  const agents = useMemo(() => sessions.flatMap(session => session.terminals.filter(terminal => terminal.terminalKind !== 'shell')), [sessions])
+  const [draggingAgent, setDraggingAgent] = useState<string | null>(null)
+  const [dropTarget, setDropTarget] = useState<string | null>(null)
   const [snapshot, setSnapshot] = useState<BoardSnapshot>(blank)
   const [positions, setPositions] = useState<Record<string, BoardPosition>>({})
   const [sections, setSections] = useState<BoardSection[]>([])
@@ -373,16 +380,19 @@ export default function BoardCanvas({ repo, sessions, isVisible = true, focusReq
               if (suppressOpen.current === note.id) { suppressOpen.current = null; event.preventDefault(); event.stopPropagation(); return }
               if (linkFrom && linkFrom !== note.id) { event.preventDefault(); event.stopPropagation(); void connectNotes(linkFrom, note.id) }
             }}
-            className={`kb-card kind-${note.kind}${editing ? ' editing selected' : ''}${dimmed ? ' dimmed' : ''}${linkFrom && linkFrom !== note.id ? ' link-target' : ''}${note.question ? ' asking' : ''}${live ? ` live-${live.state}` : ''}`}
+            className={`kb-card kind-${note.kind}${editing ? ' editing selected' : ''}${dimmed ? ' dimmed' : ''}${linkFrom && linkFrom !== note.id ? ' link-target' : ''}${note.question ? ' asking' : ''}${live ? ` live-${live.state}` : ''}${draggingAgent && canTake(note) ? ' drop-ready' : ''}${dropTarget === note.id ? ' drop-target' : ''}`}
+            onDragOver={event => { if (!canTake(note) || !event.dataTransfer.types.includes(AGENT_DRAG)) return; event.preventDefault(); event.dataTransfer.dropEffect = 'link'; if (dropTarget !== note.id) setDropTarget(note.id) }}
+            onDragLeave={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDropTarget(current => current === note.id ? null : current) }}
+            onDrop={event => { const terminalId = event.dataTransfer.getData(AGENT_DRAG); setDropTarget(null); setDraggingAgent(null); if (terminalId && canTake(note)) { event.preventDefault(); onDispatch(note.id, terminalId) } }}
             style={{ left: pos.x, top: pos.y, width: editing ? editorWidth : cardWidth, ...(editing ? { height: editorHeight, transform: `scale(${1 / viewport.zoom})` } : {}) }}
             onWheel={event => { if (editing) event.stopPropagation() }}
             onContextMenu={event => { event.stopPropagation(); if (!editing) { event.preventDefault(); setMenu({ x: event.clientX, y: event.clientY, world: worldAt(event.clientX, event.clientY), target: note.id }) } }}
           >
-            {editing ? <Inspector key={note.id} repo={repo} note={note} notes={snapshot.notes} sections={sections} sessions={sessions} focusTitle={focusTitleId === note.id} onClose={() => closeNote(note.id)} onDragStart={event => { if (!(event.target as HTMLElement).closest('button,input,select,textarea')) startDrag(event, 'note', note.id) }} apply={apply} onWork={onWork} onFocus={focusNote} onError={onError} registerSwitch={fn => { beforeSwitch.current = fn }} /> : <>
+            {editing ? <Inspector key={note.id} repo={repo} note={note} notes={snapshot.notes} sections={sections} sessions={sessions} focusTitle={focusTitleId === note.id} onClose={() => closeNote(note.id)} onDragStart={event => { if (!(event.target as HTMLElement).closest('button,input,select,textarea')) startDrag(event, 'note', note.id) }} apply={apply} agents={agents} onDispatch={onDispatch} onNewAgent={onNewAgent} onFocus={focusNote} onError={onError} registerSwitch={fn => { beforeSwitch.current = fn }} /> : <>
               <div className="kb-card-top" onPointerDown={event => { if (!(event.target as HTMLElement).closest('button,input,select,textarea')) startDrag(event, 'note', note.id) }}><span className="kb-card-kind">{kindIcon(note.kind)}{note.kind === 'context' ? 'CONTEXT' : note.kind.toUpperCase()}</span><div className="kb-card-controls"><button className="kb-card-link" aria-label={`Link ${note.title} to another note`} title="Drag to another note, or click then choose a note" disabled={snapshot.readOnly} onPointerDown={event => { event.preventDefault(); event.stopPropagation(); linkPointer.current = { from: note.id, x: event.clientX, y: event.clientY, moved: false }; setLinkFrom(note.id); setLinkCursor(worldAt(event.clientX, event.clientY)) }} onClick={event => event.stopPropagation()}><Link2 size={13} /></button></div></div>
               <button className="kb-card-open" onPointerDown={event => startDrag(event, 'note', note.id)} onClick={() => { setFocusTitleId(note.id); void openNote(note.id) }}><strong>{note.title}</strong>{note.body && <span>{note.body}</span>}</button>
               {note.question ? <div className="kb-card-question" title={note.question.text}><CircleHelp size={13} /><span>{note.question.text}</span></div>
-                : live ? <div className={`kb-card-live state-${live.state}`} title={`${live.name}: ${live.status}`}><i /><span><strong>{live.name}</strong> {live.status}</span></div>
+                : live ? <button className={`kb-card-live state-${live.state}`} title={`${live.name}: ${live.status} · show terminal`} onPointerDown={event => event.stopPropagation()} onClick={event => { event.stopPropagation(); onOpenTerminal(live.terminalId) }}><i /><span><strong>{live.name}</strong> {live.status}</span></button>
                 : lastLog && note.status !== 'done' ? <div className="kb-card-log" title={lastLog.text}><CornerDownRight size={12} /><span>{lastLog.text}</span><time>{ago(lastLog.at)}</time></div> : null}
               <div className="kb-card-foot"><span>{note.status ? <><i className={`kb-status status-${note.status}`} />{statusLabel[note.status]}</> : note.kind === 'context' ? 'CODEBASE CONTEXT' : 'NOTE'}</span><span>{date(note.updatedAt)}</span></div>
             </>}
@@ -391,6 +401,13 @@ export default function BoardCanvas({ repo, sessions, isVisible = true, focusReq
       </div>
       {!loading && !loadError && !snapshot.notes.length && <div className="kb-empty"><h3>No notes yet</h3><p>Write an idea. You can turn it into a task later.</p><div><button className="kb-add" disabled={snapshot.readOnly} onClick={() => void create('note', centerWorld())}><Plus size={15} /> Add note</button></div><small>N: note · double-click: note · right-click: more</small></div>}
       {capture && <QuickCapture key={`${capture.kind}:${capture.position.x}:${capture.position.y}`} capture={capture} onSave={text => saveCapture(capture, text)} onClose={() => setCapture(null)} />}
+      <div className="kb-agents" aria-label="Agents: drag onto a task to hand it over">
+        {agents.map(agent => { const state = terminalState(agent); return <button key={agent.id} className={`kb-puck state-${state}`} draggable title={`${agent.name} · ${terminalStatus(agent)}\nDrag onto a task to hand it over · click to show`}
+          onDragStart={event => { event.dataTransfer.setData(AGENT_DRAG, agent.id); event.dataTransfer.effectAllowed = 'link'; setDraggingAgent(agent.id) }}
+          onDragEnd={() => { setDraggingAgent(null); setDropTarget(null) }}
+          onClick={() => onOpenTerminal(agent.id)}><span className="kb-puck-face">{initials(agent.name)}</span><span className="kb-puck-name">{agent.name}</span></button> })}
+        <button className="kb-puck kb-puck-new" title="Start a new agent" onClick={onNewAgent}><span className="kb-puck-face"><Plus size={14} /></span><span className="kb-puck-name">Agent</span></button>
+      </div>
       <div className="kb-canvas-hint"><span>{linkFrom ? 'CHOOSE A NOTE TO LINK · ESC TO CANCEL' : 'DOUBLE-CLICK: NOTE · N: NOTE · T: TASK · DRAG: PAN'}</span></div>
       <div className="kb-zoom"><button aria-label="Zoom out" onClick={() => setViewport(v => ({ ...v, zoom: clamp(v.zoom - .15, .35, 1.8) }))}><Minus size={15} /></button><span>{Math.round(viewport.zoom * 100)}%</span><button aria-label="Zoom in" onClick={() => setViewport(v => ({ ...v, zoom: clamp(v.zoom + .15, .35, 1.8) }))}><Plus size={15} /></button><button aria-label="Fit canvas" onClick={() => fit(snapshot, surface.current, setViewport)}><Focus size={15} /></button></div>
     </div>
@@ -436,7 +453,7 @@ function fit(snapshot: BoardSnapshot, element: HTMLDivElement | null, setViewpor
   setViewport({ x: rect.width / 2 - (minX + maxX) / 2 * zoom, y: rect.height / 2 - (minY + maxY) / 2 * zoom, zoom })
 }
 
-function Inspector({ repo, note, notes, sections, sessions, focusTitle, onClose, onDragStart, apply, onWork, onFocus, onError, registerSwitch }: { repo: string; note: BoardNote; notes: BoardNote[]; sections: BoardSection[]; sessions: RepoContext[]; focusTitle: boolean; onClose: () => void; onDragStart: (event: ReactPointerEvent) => void; apply: (command: BoardCommand) => Promise<unknown>; onWork: (sessionId: string, task: BoardNote) => void; onFocus: (note: BoardNote) => void; onError: (message: string) => void; registerSwitch: (fn: (() => Promise<boolean>) | null) => void }) {
+function Inspector({ repo, note, notes, sections, sessions, focusTitle, onClose, onDragStart, apply, agents, onDispatch, onNewAgent, onFocus, onError, registerSwitch }: { repo: string; note: BoardNote; notes: BoardNote[]; sections: BoardSection[]; sessions: RepoContext[]; focusTitle: boolean; onClose: () => void; onDragStart: (event: ReactPointerEvent) => void; apply: (command: BoardCommand) => Promise<unknown>; agents: TerminalResource[]; onDispatch: (taskId: string, terminalId: string) => void; onNewAgent: () => void; onFocus: (note: BoardNote) => void; onError: (message: string) => void; registerSwitch: (fn: (() => Promise<boolean>) | null) => void }) {
   const [draft, setDraft] = useState(note)
   const draftRef = useRef(note)
   const savedRef = useRef(note)
@@ -562,13 +579,12 @@ function Inspector({ repo, note, notes, sections, sessions, focusTitle, onClose,
     const updated = await apply({ type: 'updateNote', id: owner.id, expectedRevision: owner.revision, patch: { links: owner.links.filter(link => link.to !== to), updatedBy: 'person' } }) as BoardNote | null
     if (updated && owner.id === note.id) { savedRef.current = updated; edit(current => ({ ...current, links: updated.links })); setSavedRevision(updated.revision) }
   }
-  const work = async () => {
-    if (!draft.sessionId) { onError('Choose a Session for this task.'); return }
-    if (stale) { onError('This task changed on disk. Reload it before starting work.'); return }
+  const [handOpen, setHandOpen] = useState(false)
+  const handTo = async (terminalId: string) => {
+    setHandOpen(false)
+    if (stale) { onError('This task changed on disk. Reload it before handing it over.'); return }
     const saved = await save()
-    if (!saved) return
-    const working = saved.status === 'working' ? saved : await apply({ type: 'updateNote', id: saved.id, expectedRevision: saved.revision, patch: { status: 'working', updatedBy: 'person' } }) as BoardNote | null
-    if (working) onWork(draft.sessionId, working)
+    if (saved) onDispatch(saved.id, terminalId)
   }
   const complete = async () => {
     const hasLearning = !!learningBody.trim()
@@ -596,7 +612,7 @@ function Inspector({ repo, note, notes, sections, sessions, focusTitle, onClose,
       <div className="kb-related"><div><span className="kb-eyebrow">LINKED NOTES</span><span>{related.length}</span></div>{related.map(item => <div className="kb-related-row" key={item.id}><button onClick={() => onFocus(item)}>{kindIcon(item.kind)}<span>{item.title}</span><ChevronRight size={13} /></button><button className="kb-unlink" aria-label={`Unlink ${item.title}`} title="Remove link" onClick={() => void unlink(item)}><X size={13} /></button></div>)}<p>On the canvas, drag the link handle from one note to another. You can also click the handle, then click the destination.</p></div>
       {history && <div className="kb-history"><span className="kb-eyebrow">PREVIOUS VERSIONS</span>{history.map(item => <button key={item.revision} onClick={() => { replaceDraft({ ...item.note, revision: savedRevision }); setHistory(null) }}>{date(item.note.updatedAt)} · {item.note.title}</button>)}{!history.length && <p>No earlier versions yet.</p>}</div>}
       {draft.kind === 'task' && learning && <div className="kb-learning"><div className="kb-learning-head"><BookOpen size={16} /><span>Codebase context</span></div><p>Record a fact another Session should be able to retrieve.</p><label>Update existing context<select value={learningTarget} onChange={e => { const id = e.target.value; setLearningTarget(id); const target = notes.find(n => n.id === id); if (target) { setLearningTitle(target.title); setLearningSubject(target.subject ?? ''); setLearningBody(target.body); setEvidence((target.evidence ?? []).map(x => x.path).join('\n')) } }}><option value="">Create new context note</option>{notes.filter(n => n.kind === 'context').map(n => <option key={n.id} value={n.id}>{n.title}</option>)}</select></label><label>Title<input value={learningTitle} onChange={e => setLearningTitle(e.target.value)} placeholder="Specific codebase fact" /></label><label>Subject<input value={learningSubject} onChange={e => setLearningSubject(e.target.value)} placeholder="e.g. database migrations" /></label><label>Concise fact<textarea rows={4} value={learningBody} onChange={e => setLearningBody(e.target.value)} placeholder="What did the code or tests prove?" /></label><label>Evidence paths<textarea rows={2} value={evidence} onChange={e => setEvidence(e.target.value)} placeholder="One file path per line" /></label><div className="kb-learning-or">or</div><label>No durable learning<input value={noLearning} onChange={e => setNoLearning(e.target.value)} placeholder="Why nothing needs to be saved" /></label><div className="kb-learning-actions"><button onClick={() => setLearning(false)}>Cancel</button><button className="kb-action" onClick={() => void complete()}>Complete task</button></div></div>}
-    </div><footer className="kb-inspector-actions"><button title="View history" aria-label="View note history" onClick={() => void openHistory()}><History size={16} /></button>{draft.kind === 'task' && !learning && <button className="kb-work" onClick={() => void work()}><Command size={14} /> Work in Session</button>}{draft.kind === 'task' && !learning && <button className="kb-work" onClick={() => setLearning(true)}><Check size={14} /> Complete</button>}<span className={`kb-save-status state-${saveState}`} role="status">{stale ? 'Changed elsewhere' : saveState === 'error' ? 'Save failed' : dirty || saveState === 'saving' ? 'Saving…' : 'Saved'}</span>{saveState === 'error' && <button onClick={() => void save()}>Retry</button>}</footer>
+    </div><footer className="kb-inspector-actions"><button title="View history" aria-label="View note history" onClick={() => void openHistory()}><History size={16} /></button>{draft.kind === 'task' && !learning && draft.status !== 'done' && <div className="kb-hand"><button className="kb-work" aria-expanded={handOpen} onClick={() => setHandOpen(value => !value)}><Command size={14} /> Hand to agent</button>{handOpen && <div className="kb-hand-menu" role="menu">{agents.map(agent => <button role="menuitem" key={agent.id} onClick={() => void handTo(agent.id)}><span className={`status-dot state-${terminalState(agent)}`} /><strong>{agent.name}</strong><small>{terminalStatus(agent)}</small></button>)}<button role="menuitem" className="kb-hand-new" onClick={() => { setHandOpen(false); onNewAgent() }}><Plus size={13} /> New agent…</button></div>}</div>}{draft.kind === 'task' && !learning && <button className="kb-work" onClick={() => setLearning(true)}><Check size={14} /> Complete</button>}<span className={`kb-save-status state-${saveState}`} role="status">{stale ? 'Changed elsewhere' : saveState === 'error' ? 'Save failed' : dirty || saveState === 'saving' ? 'Saving…' : 'Saved'}</span>{saveState === 'error' && <button onClick={() => void save()}>Retry</button>}</footer>
   </div>
 }
 

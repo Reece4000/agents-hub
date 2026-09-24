@@ -390,6 +390,21 @@ export class HubService extends EventEmitter {
         }
         return { note, delivery }
       }
+      case 'board:dispatch': {
+        // Hand a Task to one agent terminal: assign it to that terminal's
+        // Session, mark it working, start the agent if needed, and type the
+        // briefing in once the agent is idle.
+        const repo = this.repo(args.repo)
+        const resource = this.store.resource(String(args.terminalId))
+        if (resource.terminalKind === 'shell') throw new Error('Choose an agent terminal. A shell cannot receive a briefing.')
+        const task = this.boardStore.query(repo, { type: 'read', id: String(args.taskId) }) as BoardNote | null
+        if (!task || task.kind !== 'task') throw new Error('Task no longer exists.')
+        if (task.status === 'done') throw new Error('This Task is already done.')
+        const note = this.boardStore.apply(repo, { type: 'updateNote', id: task.id, expectedRevision: task.revision, patch: { sessionId: resource.contextId, agent: this.agentName(resource), status: task.question ? task.status : 'working', updatedBy: 'person' } }) as BoardNote
+        if (!this.terminals.running(resource.id)) await this.invoke('terminalOpen', { id: resource.id })
+        const delivery = this.deliver(resource.id, this.taskBriefing(repo, task.id))
+        return { note, delivery }
+      }
       case 'terminal:deliver': {
         const resource = this.store.resource(String(args.id))
         if (resource.terminalKind === 'shell') throw new Error('Choose an agent terminal, or copy the text into a shell.')

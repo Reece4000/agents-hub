@@ -166,3 +166,14 @@ span.folder-chevron{display:inline-block}
 .terminal-status{max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted)}
 .terminal-status.state-waiting{color:var(--warning)}
 .terminal-status.state-working{color:var(--secondary)}
+
+/* Tasks canvas with a docked agent terminal. */
+.tasks-stage{flex:1;min-height:0;min-width:0;display:flex}
+.tasks-stage>.knowledge-board{flex:1;min-width:0}
+.agent-drawer{position:relative;flex-shrink:0;max-width:calc(100% - 420px);display:flex;flex-direction:column;min-width:0;border-left:1px solid var(--border);background:var(--surface)}
+.agent-drawer-resize{position:absolute;left:-4px;top:0;bottom:0;width:8px;cursor:col-resize;z-index:5}
+.agent-drawer-resize:hover{background:linear-gradient(90deg,transparent 3px,var(--accent) 3px,var(--accent) 5px,transparent 5px)}
+.agent-drawer-head{display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid var(--border);min-width:0}
+.agent-drawer-head select{max-width:180px;font-size:11px;padding:4px 6px;border-radius:6px;border:1px solid var(--border);background:var(--button);color:var(--text)}
+.agent-drawer-status{flex:1;min-width:0;font-size:10px}
+.agent-drawer-body{flex:1;min-height:0;display:flex;flex-direction:column;padding:6px}

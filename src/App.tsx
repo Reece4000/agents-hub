@@ -4,13 +4,13 @@ import { flushTerminalDraft } from './TerminalComposer'
 import FolderBrowser from './FolderBrowser'
 import LaunchModal, { type TerminalLaunchRequest } from './LaunchModal'
 import TerminalView, { disposeTerminal } from './TerminalView'
+import AgentDrawer, { DRAWER_DEFAULT, DRAWER_MAX, DRAWER_MIN } from './AgentDrawer'
 import BoardCanvas from './BoardCanvas'
 import { bridge } from './bridge'
 import { mostUrgent, STATE_LABELS, terminalState, terminalStatus } from './agentState'
 import { applyThemeVars, customThemeVars, DEFAULT_ACCENT, DEFAULT_CANVAS } from './theme'
 import type { ThemeMode } from './theme'
 import type { Bootstrap, RepoContext, TerminalResource, Workspace } from './types'
-import type { BoardNote } from '../shared/board'
 
 const SIDE_MIN = 200, SIDE_MAX = 480, SIDE_DEFAULT = 248
 const clampSide = (width: number) => Math.min(SIDE_MAX, Math.max(SIDE_MIN, width))
@@ -48,6 +48,15 @@ function WorkspaceApp() {
   const activeContext = repoContexts.find(context => context.id === activeContextId) ?? repoContexts.find(context => context.id === data?.workspace.selectedContexts?.[repo]) ?? repoContexts[0] ?? null
   const activeTerminal = activeContext?.terminals.find(terminal => terminal.id === activeTerminals[activeContext.id]) ?? activeContext?.terminals[0] ?? null
   const allTerminals = repoContexts.flatMap(context => context.terminals)
+  const agentTerminals = allTerminals.filter(terminal => terminal.terminalKind !== 'shell')
+  const [drawerId, setDrawerId] = useState<string | null>(null)
+  const lastDrawer = useRef<string | null>(null)
+  const [drawerWidth, setDrawerWidth] = useState(() => {
+    try { const saved = Number(localStorage.getItem('agent-hub-drawer-width')); return saved ? Math.min(DRAWER_MAX, Math.max(DRAWER_MIN, saved)) : DRAWER_DEFAULT } catch { return DRAWER_DEFAULT }
+  })
+  const drawerTerminal = allTerminals.find(terminal => terminal.id === drawerId) ?? null
+  const openDrawer = (id: string | null) => { if (id) lastDrawer.current = id; setDrawerId(id) }
+  const resizeDrawer = (width: number) => { setDrawerWidth(width); try { localStorage.setItem('agent-hub-drawer-width', String(width)) } catch { /* width is a convenience */ } }
   const runningCount = allTerminals.filter(terminal => terminal.terminalRunning).length
   const selectionRequest = useRef(0)
 
@@ -140,14 +149,13 @@ function WorkspaceApp() {
     setView('terminals')
     void selectContext(owner)
   }), [data, repo])
-  const workOnTask = async (sessionId: string, task: BoardNote) => {
-    const session = repoContexts.find(item => item.id === sessionId)
-    if (!session) { notify('That Session is no longer available.'); return }
+  /** Hand a Task to one agent terminal and show that agent beside the canvas. */
+  const dispatch = async (taskId: string, terminalId: string) => {
     try {
-      const text = await bridge.invoke<string>('board:briefing', { repo, id: task.id })
-      setBriefing({ sessionId, title: task.title, text })
-      await selectContext(session)
-      setView('terminals')
+      const terminal = allTerminals.find(item => item.id === terminalId)
+      const { delivery } = await bridge.invoke<{ delivery: 'sent' | 'queued' }>('board:dispatch', { repo, taskId, terminalId })
+      openDrawer(terminalId)
+      if (delivery === 'queued' && terminal) notify(`${terminal.name} will get the briefing when it is idle.`)
     } catch (error) { notify((error as Error).message) }
   }
   const openBoardBrief = async (sessionId: string) => {
@@ -221,6 +229,18 @@ function WorkspaceApp() {
     }
     window.addEventListener('keydown', handler); return () => window.removeEventListener('keydown', handler)
   }, [])
+  // ⌘J toggles the terminal drawer, even while a terminal has focus.
+  useEffect(() => {
+    const toggle = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== 'j' || event.shiftKey || event.altKey) return
+      event.preventDefault(); event.stopPropagation()
+      setView('tasks')
+      setDrawerId(current => current ? null : lastDrawer.current && allTerminalIds.current.includes(lastDrawer.current) ? lastDrawer.current : agentIds.current[0] ?? allTerminalIds.current[0] ?? null)
+    }
+    window.addEventListener('keydown', toggle, true); return () => window.removeEventListener('keydown', toggle, true)
+  }, [])
+  const allTerminalIds = useRef<string[]>([]); allTerminalIds.current = allTerminals.map(item => item.id)
+  const agentIds = useRef<string[]>([]); agentIds.current = agentTerminals.map(item => item.id)
   useEffect(() => {
     if (!settings) return
     const outside = (event: PointerEvent) => {
@@ -245,7 +265,11 @@ function WorkspaceApp() {
     {sidebar && <aside className="sidebar" aria-label="Folder browser"><FolderBrowser selected={repo} contexts={contexts} disabled={busy} onSelect={path => void selectRepo(path)} onNewContext={startContext} onError={notify} /><div className="sidebar-resize" role="separator" aria-orientation="vertical" aria-label="Resize folder browser" tabIndex={0} onPointerDown={(event: ReactPointerEvent<HTMLDivElement>) => { event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId); sideDrag.current = { startX: event.clientX, startW: sideWidth } }} onPointerMove={event => { const drag = sideDrag.current; if (drag) setSideWidth(clampSide(drag.startW + event.clientX - drag.startX)) }} onPointerUp={() => { sideDrag.current = null; try { localStorage.setItem('agent-hub-sidebar-width', String(sideWidth)) } catch {} }} onPointerCancel={() => { sideDrag.current = null }} onKeyDown={(event: ReactKeyboardEvent<HTMLDivElement>) => { if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') setSideWidth(value => clampSide(value + (event.key === 'ArrowRight' ? 12 : -12))) }} /></aside>}
     <main className="workspace">
       {data.error && <div className="connection-error"><span>{data.error}</span><button onClick={() => void bridge.invoke<Bootstrap>('bootstrap').then(setData)}>Reconnect</button></div>}
-      <BoardCanvas repo={repo} sessions={repoContexts} isVisible={view === 'tasks'} focusRequest={focusRequest} onError={notify} onWork={(id, task) => void workOnTask(id, task)} />{view === 'terminals' && <section className="contexts-view" aria-label="Agent Sessions">
+      <div className="tasks-stage" style={view === 'tasks' ? undefined : { display: 'none' }}>
+        <BoardCanvas repo={repo} sessions={repoContexts} isVisible={view === 'tasks'} focusRequest={focusRequest} onError={notify} onDispatch={(taskId, terminalId) => void dispatch(taskId, terminalId)} onOpenTerminal={openDrawer} onNewAgent={() => startContext(repo)} />
+        {view === 'tasks' && drawerTerminal && <AgentDrawer terminal={drawerTerminal} sessions={repoContexts} width={drawerWidth} onWidth={resizeDrawer} onSelect={openDrawer} onClose={() => setDrawerId(null)} onError={notify} patch={patchTerminal} themeMode={themeMode} themeBackground={customBg} themeAccent={customAccent}
+          onExpand={() => { const owner = repoContexts.find(context => context.terminals.some(item => item.id === drawerTerminal.id)); if (owner) { setActiveTerminals(current => ({ ...current, [owner.id]: drawerTerminal.id })); void selectContext(owner) } setDrawerId(null); setView('terminals') }} />}
+      </div>{view === 'terminals' && <section className="contexts-view" aria-label="Agent Sessions">
         <div className="sessions-strip"><div className="context-tabs" role="tablist" aria-label={`Sessions in ${folderName(repo)}`}>
           {repoContexts.map(context => <button role="tab" aria-selected={activeContext?.id === context.id} className={`context-tab${activeContext?.id === context.id ? ' active' : ''}`} key={context.id} onClick={() => void selectContext(context)} title={`${context.name} · ${context.terminals.length} terminals · ${STATE_LABELS[mostUrgent(context.terminals)]}`}><span className={`status-dot state-${mostUrgent(context.terminals)}`} /><span className="context-tab-name">{context.name}</span><small>{context.terminals.length}</small></button>)}
           <button className="icon-button context-tab-add" aria-label="New Session" title="New Session" disabled={busy || !repo} onClick={() => startContext(repo)}><Plus size={15} /></button>

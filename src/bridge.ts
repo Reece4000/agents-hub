@@ -128,6 +128,16 @@ function previewBridge(): Bridge {
         case 'board:apply': return board.apply(String(args.repo || state.selectedRepo), args.command) as T
         case 'board:answer': return { note: board.apply(String(args.repo || state.selectedRepo), { type: 'answerQuestion', id: String(args.id), answer: String(args.answer) }), delivery: 'none' } as T
         case 'terminal:deliver': return 'queued' as T
+        case 'board:dispatch': {
+          const root = String(args.repo || state.selectedRepo), terminal = findTerminal(String(args.terminalId))
+          if (!terminal) throw new Error('That agent is no longer available.')
+          const task = board.query(root, { type: 'read', id: String(args.taskId) }) as import('../shared/board').BoardNote | null
+          if (!task) throw new Error('Task no longer exists.')
+          const note = board.apply(root, { type: 'updateNote', id: task.id, expectedRevision: task.revision, patch: { sessionId: terminal.contextId, agent: terminal.name, status: task.question ? task.status : 'working' } })
+          terminal.terminalRunning = true; terminal.activity = { state: 'working', detail: 'Reading the briefing', since: new Date().toISOString(), source: 'hooks' }
+          emit()
+          return { note, delivery: 'queued' } as T
+        }
         case 'board:image:add': {
           const id = crypto.randomUUID(), mime = String(args.mime)
           const extension = mime === 'image/jpeg' ? 'jpg' : mime.split('/')[1]
