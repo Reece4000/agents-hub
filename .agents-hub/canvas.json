@@ -1,58 +1,122 @@
 {
   "version": 1,
-  "sections": [],
+  "sections": [
+    {
+      "id": "SC-E25F55449B87",
+      "title": "Modal UX",
+      "x": -37,
+      "y": -114,
+      "width": 620,
+      "height": 272,
+      "collapsed": false
+    },
+    {
+      "id": "SC-2193587B7A2B",
+      "title": "Movement",
+      "x": 760,
+      "y": 80,
+      "width": 620,
+      "height": 272,
+      "collapsed": false
+    },
+    {
+      "id": "SC-3B1C34733FDA",
+      "title": "Autosave",
+      "x": -182,
+      "y": 281,
+      "width": 620,
+      "height": 272,
+      "collapsed": false
+    },
+    {
+      "id": "SC-61143034FCB4",
+      "title": "Voice",
+      "x": 760,
+      "y": 412,
+      "width": 620,
+      "height": 272,
+      "collapsed": false
+    },
+    {
+      "id": "SC-66ED22F705D7",
+      "title": "Assets",
+      "x": 80,
+      "y": 744,
+      "width": 620,
+      "height": 272,
+      "collapsed": false
+    },
+    {
+      "id": "SC-13564251A8F8",
+      "title": "Session",
+      "x": 760,
+      "y": 744,
+      "width": 620,
+      "height": 272,
+      "collapsed": false
+    },
+    {
+      "id": "SC-E1E52964BDFA",
+      "title": "Organize",
+      "x": 80,
+      "y": 1076,
+      "width": 620,
+      "height": 272,
+      "collapsed": false
+    }
+  ],
   "positions": {
     "AH-BAD925F022D9": {
-      "x": -244,
-      "y": -206
+      "x": 784,
+      "y": 468
     },
     "AH-A40BD615EEFB": {
-      "x": -563,
-      "y": -267
+      "x": -157,
+      "y": 326
     },
     "AH-2212EF69454F": {
-      "x": 368,
-      "y": 12
+      "x": 785,
+      "y": 138
     },
     "AH-889FBF96E237": {
-      "x": -417,
-      "y": 44
+      "x": -13,
+      "y": -58
     },
     "AH-058D0CA9299A": {
-      "x": 369,
-      "y": -282
+      "x": 104,
+      "y": 1132
     },
     "AH-9201DE507D25": {
-      "x": -476,
-      "y": 280
+      "x": 784,
+      "y": 800
     },
     "AH-EED6CFFD836E": {
-      "x": 359,
-      "y": 272
+      "x": 104,
+      "y": 800
     },
     "AH-1D32B42ADED0": {
-      "x": -80,
-      "y": 50
+      "x": 265,
+      "y": -58
     },
     "AH-B0C78264EC1A": {
-      "x": 867,
-      "y": -267
+      "x": 120,
+      "y": 337
     },
     "AH-ECB7408F60C2": {
-      "x": 654,
-      "y": 12
+      "x": 1062,
+      "y": 136
     },
     "AH-8F28DE219B82": {
-      "x": -190,
-      "y": 280
+      "x": 1062,
+      "y": 800
     },
     "AH-6C6F99560D4C": {
-      "x": 645,
-      "y": 272
+      "x": 382,
+      "y": 800
     },
     "AH-9F090A2DBA98": {
-      "x": 1227,
-      "y": -282
+      "x": 382,
+      "y": 1132
     }
   }
 }
