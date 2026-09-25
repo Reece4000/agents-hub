@@ -1,6 +1,7 @@
 import { mkdirSync, readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs'
-import { join } from 'node:path'
-import type { Workspace, RepoContext, TerminalKind, TerminalResource } from '../src/types'
+import { basename, isAbsolute, join, normalize } from 'node:path'
+import { randomUUID } from 'node:crypto'
+import type { Workspace, Project, ProjectFolder, RepoContext, TerminalKind, TerminalResource } from '../src/types'
 
 export const emptyDraft = () => ({ html: '', text: '', attachments: [] })
 const KINDS: TerminalKind[] = ['codex', 'claude', 'cursor', 'shell', 'custom']
@@ -30,9 +31,9 @@ function normalizeResource(raw: any, contextId: string, repo: string): TerminalR
   }
 }
 
-export function newContext(id: string, repo: string, name: string, terminal: TerminalResource): RepoContext {
+export function newContext(id: string, projectId: string, repo: string, name: string, terminal: TerminalResource): RepoContext {
   const now = new Date().toISOString()
-  return { id, repo, name, terminals: [{ ...terminal, contextId: id, repo }], createdAt: now, updatedAt: now }
+  return { id, projectId, repo, name, terminals: [{ ...terminal, contextId: id, repo }], createdAt: now, updatedAt: now }
 }
 
 function normalizeContext(raw: any): RepoContext {
@@ -41,7 +42,68 @@ function normalizeContext(raw: any): RepoContext {
   const now = new Date().toISOString()
   if (!id || !repo) throw new Error('Unsupported Agent Hub workspace file. Your saved file has been preserved.')
   const stored: any[] = Array.isArray(raw.terminals) && raw.terminals.length ? raw.terminals : [{ id: `res-${id}`, terminalKind: 'shell' }]
-  return { id, repo, name: String(raw.name ?? 'Session').slice(0, 60), terminals: stored.map(value => normalizeResource(value, id, repo)), createdAt: String(raw.createdAt ?? now), updatedAt: String(raw.updatedAt ?? now) }
+  return { id, projectId: typeof raw.projectId === 'string' ? raw.projectId : '', repo, name: String(raw.name ?? 'Session').slice(0, 60), terminals: stored.map(value => normalizeResource(value, id, repo)), createdAt: String(raw.createdAt ?? now), updatedAt: String(raw.updatedAt ?? now) }
+}
+
+export const PROJECT_COLORS = ['#7aa2f7', '#9ece6a', '#e0af68', '#bb9af7', '#7dcfff', '#f7768e', '#73daca', '#ff9e64']
+/** Where a project's board lives: Agent Hub's data directory, not a repo. */
+export const projectBoardRoot = (directory: string, id: string) => join(directory, 'projects', id)
+const projectId = /^prj-[\w-]{1,80}$/
+
+/** Validate a project's folders: absolute, normalized, unique, primary first. */
+export function projectFolders(raw: unknown): ProjectFolder[] {
+  const seen = new Set<string>()
+  const folders: ProjectFolder[] = []
+  for (const item of Array.isArray(raw) ? raw.slice(0, 32) : []) {
+    const value = typeof item === 'string' ? { path: item } : item as Record<string, unknown>
+    if (!value || typeof value.path !== 'string' || !isAbsolute(value.path)) continue
+    const path = normalize(value.path).replace(/(.)\/+$/, '$1')
+    if (seen.has(path)) continue
+    seen.add(path)
+    const label = typeof value.label === 'string' ? value.label.trim().slice(0, 60) : ''
+    const note = typeof value.note === 'string' ? value.note.trim().slice(0, 500) : ''
+    folders.push({ path, ...(label ? { label } : {}), ...(note ? { note } : {}) })
+  }
+  return folders
+}
+
+export function newProject(directory: string, input: { name?: unknown; description?: unknown; color?: unknown; folders?: unknown; importFrom?: string }, index = 0): Project {
+  const folders = projectFolders(input.folders)
+  const name = typeof input.name === 'string' && input.name.trim() ? input.name.trim().slice(0, 80) : folders[0] ? basename(folders[0].path) : 'Untitled project'
+  const id = `prj-${randomUUID()}`
+  const now = new Date().toISOString()
+  const color = typeof input.color === 'string' && /^#[0-9a-f]{6}$/i.test(input.color) ? input.color.toLowerCase() : PROJECT_COLORS[index % PROJECT_COLORS.length]
+  return { id, name, description: typeof input.description === 'string' ? input.description.trim().slice(0, 2000) : '', color, folders, boardRoot: projectBoardRoot(directory, id), ...(input.importFrom ? { importFrom: input.importFrom } : {}), createdAt: now, updatedAt: now }
+}
+
+function normalizeProject(raw: any, directory: string): Project | null {
+  if (!raw || typeof raw.id !== 'string' || !projectId.test(raw.id)) return null
+  const project = newProject(directory, raw)
+  return { ...project, id: raw.id, boardRoot: projectBoardRoot(directory, raw.id), color: typeof raw.color === 'string' && /^#[0-9a-f]{6}$/i.test(raw.color) ? raw.color : project.color,
+    ...(typeof raw.importFrom === 'string' && isAbsolute(raw.importFrom) ? { importFrom: raw.importFrom } : {}),
+    createdAt: String(raw.createdAt ?? project.createdAt), updatedAt: String(raw.updatedAt ?? project.updatedAt) }
+}
+
+/** Before projects, Sessions and boards belonged to a folder. Each folder
+ *  with Sessions or a repository board becomes a one-folder project, and
+ *  its board is copied in on first use. */
+function migrateToProjects(state: Workspace, directory: string) {
+  const byFolder = new Map<string, Project>()
+  for (const project of state.projects) if (project.folders[0]) byFolder.set(project.folders[0].path, project)
+  const ensure = (folder: string) => {
+    let project = byFolder.get(folder)
+    if (!project) {
+      project = newProject(directory, { folders: [folder], importFrom: existsSync(join(folder, '.agents-hub', 'notes')) ? folder : undefined }, state.projects.length)
+      state.projects.push(project); byFolder.set(folder, project)
+    }
+    return project
+  }
+  for (const context of state.contexts) if (!state.projects.some(project => project.id === context.projectId)) context.projectId = ensure(context.repo).id
+  for (const folder of state.repos) if (existsSync(join(folder, '.agents-hub', 'notes'))) ensure(folder)
+  const selected: Record<string, string> = {}
+  for (const [key, value] of Object.entries(state.selectedContexts ?? {})) selected[key.startsWith('prj-') ? key : byFolder.get(key)?.id ?? key] = value
+  state.selectedContexts = selected
+  if (!state.projects.some(project => project.id === state.selectedProject)) state.selectedProject = byFolder.get(state.selectedRepo)?.id ?? state.projects[0]?.id
 }
 
 export const persistedResource = ({ activity: _live, ...resource }: TerminalResource): TerminalResource => ({ ...resource, terminalRunning: false })
@@ -57,14 +119,16 @@ export class Store {
   constructor(public directory: string, initialRepo = process.cwd()) {
     mkdirSync(directory, { recursive: true })
     const file = join(directory, 'workspace.json')
-    this.state = { version: 2, repos: [initialRepo], contexts: [], selectedRepo: initialRepo, selectedContexts: {}, viewports: {}, theme: 'dark' }
+    this.state = { version: 2, projects: [], repos: [initialRepo], contexts: [], selectedRepo: initialRepo, selectedContexts: {}, viewports: {}, theme: 'dark' }
     if (!existsSync(file)) return
     // A corrupt store must surface an error instead of silently overwriting saved work.
     const data = JSON.parse(readFileSync(file, 'utf8')) as Omit<Workspace, 'version'> & { version: number }
     if (![2, 3].includes(data.version) || !Array.isArray(data.repos) || !Array.isArray(data.contexts)) throw new Error('Unsupported Agent Hub workspace file. Your saved file has been preserved.')
     const { themeBackground, themeAccent } = data
     this.state = {
-      version: 2, repos: data.repos, contexts: data.contexts.map(normalizeContext),
+      version: 2, projects: (Array.isArray(data.projects) ? data.projects : []).map(item => normalizeProject(item, directory)).filter((item): item is Project => !!item),
+      ...(typeof data.selectedProject === 'string' ? { selectedProject: data.selectedProject } : {}),
+      repos: data.repos, contexts: data.contexts.map(normalizeContext),
       selectedRepo: data.selectedRepo, selectedContexts: data.selectedContexts ?? {},
       viewports: data.viewports ?? {}, theme: data.theme ?? 'dark',
       ...(themeBackground ? { themeBackground } : {}), ...(themeAccent ? { themeAccent } : {}),
@@ -74,12 +138,20 @@ export class Store {
       if (this.state.selectedRepo === '/') this.state.selectedRepo = this.state.repos[0] || initialRepo
     }
     if (!this.state.repos.includes(this.state.selectedRepo) && this.state.repos.length) this.state.selectedRepo = this.state.repos[0]
+    migrateToProjects(this.state, directory)
   }
   save() {
     const target = join(this.directory, 'workspace.json')
     writeFileSync(target + '.tmp', JSON.stringify(persistedWorkspace(this.state)), { mode: 0o600 })
     renameSync(target + '.tmp', target)
   }
+  project(id: string) {
+    const project = this.state.projects.find(item => item.id === id)
+    if (!project) throw new Error('This project is no longer available.')
+    return project
+  }
+  /** The project a board root belongs to. */
+  projectForBoard(root: string) { return this.state.projects.find(project => project.boardRoot === normalize(root).replace(/\/+$/, '')) }
   context(id: string) {
     const context = this.state.contexts.find(c => c.id === id)
     if (!context) throw new Error('This context is no longer available.')

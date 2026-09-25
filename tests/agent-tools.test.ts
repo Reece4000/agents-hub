@@ -95,10 +95,11 @@ test('dispatch assigns a Task to an agent terminal, starts it, and queues the br
   let opened = 0
   service.terminals.open = (async () => { opened++; return { data: '', seq: 0, cols: 90, rows: 28, running: true } }) as typeof service.terminals.open
   try {
-    service.boardStore.load(dir)
     const context = await service.invoke('newContext', { repo: dir, name: 'backend', terminalKind: 'custom', terminalName: 'Reviewer', profile: { label: 'Env', executable: '/usr/bin/env', args: [] } })
     const terminal = context.terminals[0]
-    const task = service.boardStore.apply(dir, { type: 'createNote', note: { kind: 'task', title: 'Review the drawer' } }) as BoardNote
+    const board = service.store.state.projects[0].boardRoot
+    service.boardStore.load(board)
+    const task = service.boardStore.apply(board, { type: 'createNote', note: { kind: 'task', title: 'Review the drawer' } }) as BoardNote
     const result = await service.invoke('board:dispatch', { repo: dir, taskId: task.id, terminalId: terminal.id })
     assert.equal(opened, 1, 'a stopped agent is started')
     assert.equal(result.delivery, 'queued', 'the briefing waits for the agent to be idle')

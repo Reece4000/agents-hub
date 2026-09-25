@@ -47,6 +47,10 @@ export interface LaunchContext {
   hookUrl?: string
   /** A conversation to continue, from an earlier run of this terminal. */
   resumeId?: string
+  /** Other project folders the agent may read and edit. */
+  addDirs?: string[]
+  /** What the agent should know about its project, added to its instructions. */
+  instructions?: string
 }
 export interface LaunchPlan { args: string[]; env: Record<string, string>; conversationId?: string }
 
@@ -66,6 +70,8 @@ export function launchPlan(provider: Provider | null, baseArgs: string[], contex
   const env: Record<string, string> = context.hookUrl ? { AGENT_HUB_HOOK_URL: context.hookUrl } : {}
   if (provider === 'claude') {
     const args = [...baseArgs]
+    if (context.addDirs?.length) args.push('--add-dir', ...context.addDirs)
+    if (context.instructions) args.push('--append-system-prompt', context.instructions)
     const server = boardServer(context)
     if (server) args.push('--mcp-config', JSON.stringify({ mcpServers: { 'agent-hub': { type: 'stdio', ...server } } }))
     const settings: Record<string, unknown> = {}
@@ -90,6 +96,8 @@ export function launchPlan(provider: Provider | null, baseArgs: string[], contex
     // layered over the user's own config for this run only.
     const toml = (value: string) => JSON.stringify(value)
     const flags: string[] = []
+    for (const dir of context.addDirs ?? []) flags.push('--add-dir', dir)
+    if (context.instructions) flags.push('-c', `developer_instructions=${toml(context.instructions)}`)
     const set = (key: string, value: string) => flags.push('-c', `${key}=${value}`)
     const server = boardServer(context)
     if (server) {

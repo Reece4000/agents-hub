@@ -1,9 +1,9 @@
 import { EventEmitter } from 'node:events'
-import { mkdirSync, readFileSync, writeFileSync, statSync, readdirSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, statSync, readdirSync } from 'node:fs'
 import { join, basename, extname, isAbsolute, normalize, delimiter } from 'node:path'
 import { homedir } from 'node:os'
 import { v7 as uuid } from 'uuid'
-import { Store, newContext, emptyDraft, liveContext, liveResource, liveWorkspace } from './store'
+import { Store, newContext, newProject, projectFolders, emptyDraft, liveContext, liveResource, liveWorkspace, PROJECT_COLORS } from './store'
 import { Terminals, type TerminalHost } from './terminals'
 import { agentEnvironment, availableAgents, customProfile, isBuiltinAgent, nativeProfile } from './provider-profiles'
 import { launchPlan, providerFor, writeBoardShim } from './agent-integration'
@@ -16,7 +16,7 @@ import { BoardOrganizer } from './board-organizer'
 import { TicketStore } from './tickets'
 import { BoardStore } from './board-store'
 import type { BoardCommand, BoardNote, BoardQuery } from '../shared/board'
-import type { Attachment, Bootstrap, RepoContext, TerminalKind, TerminalProfile, TerminalResource, Ticket } from '../src/types'
+import type { Attachment, Bootstrap, Project, RepoContext, TerminalKind, TerminalProfile, TerminalResource, Ticket } from '../src/types'
 import { normalizeThemeColor, themeEnvironment } from '../src/theme'
 
 /** Screen text of a startup or confirmation dialog that typed input would answer. */
@@ -183,29 +183,76 @@ export class HubService extends EventEmitter {
     return true
   }
   private repo(value: unknown): string {
-    if (typeof value !== 'string' || !isAbsolute(value) || !statSync(value).isDirectory()) throw new Error('Choose an existing folder.')
+    if (typeof value !== 'string' || !isAbsolute(value) || !statSync(value, { throwIfNoEntry: false })?.isDirectory()) throw new Error(`Choose an existing folder${typeof value === 'string' ? `: ${value} is missing` : ''}.`)
     return value
   }
-  private contextName(repo: string, raw: unknown): string {
+  private contextName(projectId: string, raw: unknown): string {
     const name = typeof raw === 'string' ? raw.trim().slice(0, 60) : ''
     if (name) return name
-    const count = this.store.state.contexts.filter(c => c.repo === repo).length
+    const count = this.store.state.contexts.filter(c => c.projectId === projectId).length
     return `Session ${count + 1}`
   }
+  /** The project a request names: its id, its board root (what the
+   *  renderer sends as `repo` for board calls), or one of its folders. */
+  private projectFrom(value: unknown): Project {
+    if (typeof value === 'string' && value.startsWith('prj-')) return this.store.project(value)
+    if (typeof value !== 'string' || !isAbsolute(value)) throw new Error('Choose a project.')
+    const byBoard = this.store.projectForBoard(value)
+    if (byBoard) return byBoard
+    const folder = normalize(value).replace(/(.)\/+$/, '$1')
+    const owner = this.store.state.projects.find(project => project.folders.some(item => item.path === folder))
+    if (!owner) throw new Error('This folder is not in a project. Add it to one first.')
+    return owner
+  }
+  /** A project's board root, ready to use: created, with a migrated
+   *  repository board copied in once, and project.json describing its
+   *  folders for the board CLI and MCP server. */
+  private board(value: unknown): string {
+    const project = this.projectFrom(value)
+    this.prepareBoard(project)
+    return project.boardRoot
+  }
+  private prepareBoard(project: Project) {
+    mkdirSync(project.boardRoot, { recursive: true, mode: 0o700 })
+    const hub = join(project.boardRoot, '.agents-hub')
+    if (project.importFrom) {
+      const source = join(project.importFrom, '.agents-hub')
+      if (!existsSync(hub) && existsSync(source)) cpSync(source, hub, { recursive: true, filter: path => !path.endsWith('.write-lock') })
+      delete project.importFrom
+      this.store.save()
+    }
+    const manifest = JSON.stringify({ id: project.id, name: project.name, description: project.description, folders: project.folders }, null, 2)
+    const file = join(project.boardRoot, 'project.json')
+    let current = ''
+    try { current = readFileSync(file, 'utf8') } catch { /* first write */ }
+    if (current !== manifest) writeFileSync(file, manifest, { mode: 0o600 })
+  }
+  private primaryFolder(project: Project) {
+    const primary = project.folders[0]?.path
+    if (!primary) throw new Error(`Add a folder to ${project.name} first.`)
+    return primary
+  }
+  /** Agent-facing description of a project's folders. */
+  private projectBrief(project: Project, cwd?: string) {
+    const folders = project.folders.map((folder, index) => `- ${folder.path}${folder.label ? ` (${folder.label})` : ''}${index === 0 ? ' [primary]' : ''}${folder.note ? `: ${folder.note}` : ''}`).join('\n')
+    return `You are working in the Agent Hub project "${project.name}"${project.description ? `: ${project.description}` : ''}. The project spans these folders, and you have access to all of them:\n${folders}${cwd && cwd !== project.folders[0]?.path ? `\nYour working directory is ${cwd}.` : ''}\nThe project's shared board of tasks, notes, and codebase context is available through the board_* MCP tools or the agent-hub-board command. Evidence paths in context notes are absolute or relative to the primary folder.`
+  }
   private taskBriefing(repo: string, id: string) {
+    const project = this.store.projectForBoard(repo)
     const task = this.boardStore.query(repo, { type: 'read', id }) as BoardNote | null
     if (!task || task.kind !== 'task') throw new Error('Task no longer exists.')
     const related = this.boardStore.query(repo, { type: 'related', id }) as BoardNote[]
     const summary = this.boardStore.query(repo, { type: 'summary' }) as { total: number; byKind: Record<string, number> }
     const context = related.filter(note => note.kind === 'context').slice(0, 6)
     const recentContext = (this.boardStore.query(repo, { type: 'search', kind: 'context', limit: 200 }) as BoardNote[]).filter(note => !context.some(linked => linked.id === note.id)).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 6)
-    return `Work on Agent Hub task ${task.id}: ${task.title}\n\n${task.body || 'Read the task note for its full brief.'}\n\n${task.worktree ? `You are working in your own git worktree at ${task.worktree.path} on branch ${task.worktree.branch}, started from ${task.worktree.base.slice(0, 10)}. Other agents work on sibling tasks in parallel in their own worktrees. Commit your work on this branch and do not modify the main checkout at ${repo}. Dependencies may need installing in this worktree.\n\n` : ''}Acceptance checks:\n${task.acceptance?.length ? task.acceptance.map(item => `- ${item}`).join('\n') : '- Define and verify a concrete outcome.'}\n\nImages to inspect:\n${task.images?.length ? task.images.map(image => `- ${join(repo, image.path)}${image.description ? ` — ${image.description}` : ''}`).join('\n') : '- None attached.'}\n\nThe Tasks canvas is the repository's shared context (${summary.total} notes, ${summary.byKind.context ?? 0} codebase context notes). Read .agents-hub/README.md and .agents-hub/notes/${task.id}.md. Query the board for other relevant tasks, notes, and context before changing code. Linked context:\n${context.length ? context.map(note => `- ${note.id} ${note.title}: ${note.body.slice(0, 280)}`).join('\n') : '- None linked.'}\n\nOther codebase context to check:\n${recentContext.length ? recentContext.map(note => `- ${note.id} ${note.title}`).join('\n') : '- None.'}\n\nBoard tools: use the board_* MCP tools, or run agent-hub-board summary (then search '{"kind":"context"}', read '"${task.id}"'). Without either, read the note files directly. Log meaningful steps with board_log_progress (agent-hub-board log \"...\") so progress shows on the canvas; if you need a decision, ask with board_ask and end your turn, and the answer will be typed here. After coding, complete the Task with board_complete_task (agent-hub-board complete-task): give the outcome, checked acceptance criteria, and one concise, evidence-backed codebase learning as a Context change, or a no-learning reason only if nothing durable was learned.`
+    return `Work on Agent Hub task ${task.id}: ${task.title}\n\n${project ? `${this.projectBrief(project)}\n\n` : ''}${task.body || 'Read the task note for its full brief.'}\n\n${task.worktree ? `You are working in your own git worktree at ${task.worktree.path} on branch ${task.worktree.branch}, started from ${task.worktree.base.slice(0, 10)}. Other agents work on sibling tasks in parallel in their own worktrees. Commit your work on this branch and do not modify the main checkout at ${project ? this.primaryFolder(project) : repo}. Dependencies may need installing in this worktree.\n\n` : ''}Acceptance checks:\n${task.acceptance?.length ? task.acceptance.map(item => `- ${item}`).join('\n') : '- Define and verify a concrete outcome.'}\n\nImages to inspect:\n${task.images?.length ? task.images.map(image => `- ${join(repo, image.path)}${image.description ? ` — ${image.description}` : ''}`).join('\n') : '- None attached.'}\n\nThe Tasks canvas is the repository's shared context (${summary.total} notes, ${summary.byKind.context ?? 0} codebase context notes). Read .agents-hub/README.md and .agents-hub/notes/${task.id}.md. Query the board for other relevant tasks, notes, and context before changing code. Linked context:\n${context.length ? context.map(note => `- ${note.id} ${note.title}: ${note.body.slice(0, 280)}`).join('\n') : '- None linked.'}\n\nOther codebase context to check:\n${recentContext.length ? recentContext.map(note => `- ${note.id} ${note.title}`).join('\n') : '- None.'}\n\nBoard tools: use the board_* MCP tools, or run agent-hub-board summary (then search '{"kind":"context"}', read '"${task.id}"'). Without either, read the note files directly. Log meaningful steps with board_log_progress (agent-hub-board log \"...\") so progress shows on the canvas; if you need a decision, ask with board_ask and end your turn, and the answer will be typed here. After coding, complete the Task with board_complete_task (agent-hub-board complete-task): give the outcome, checked acceptance criteria, and one concise, evidence-backed codebase learning as a Context change, or a no-learning reason only if nothing durable was learned.`
   }
   private boardBriefing(repo: string, sessionId: string) {
     const snapshot = this.boardStore.load(repo)
     const active = snapshot.notes.filter(note => note.kind === 'task' && note.sessionId === sessionId && note.status === 'working').sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0]
     const context = snapshot.notes.filter(note => note.kind === 'context').sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 8)
-    return `You are working in Agent Hub for ${repo}. The Tasks canvas is shared repository memory, stored in .agents-hub/notes/*.md; .agents-hub/canvas.json stores positions and sections. Read .agents-hub/README.md first.\n\nStart by reviewing the board and relevant notes with the board_* MCP tools, or run agent-hub-board summary, then search '{"kind":"context"}' and read relevant Task and Context notes. If neither is available, read the Markdown files directly.\n\n${active ? `Active Task: ${active.id} ${active.title}. Read .agents-hub/notes/${active.id}.md and keep its status current.\n\n` : ''}Recent codebase context:\n${context.length ? context.map(note => `- ${note.id} ${note.title}: ${note.body.slice(0, 180)}`).join('\n') : '- None yet.'}\n\nUse the board as context while coding. At the end of a Task, update its outcome and acceptance checks and record one concise codebase learning with evidence paths in a Context note. Use board_complete_task (agent-hub-board complete-task) when available.`
+    const project = this.store.projectForBoard(repo)
+    return `${project ? this.projectBrief(project) : `You are working in Agent Hub for ${repo}.`} The Tasks canvas is the project's shared memory, stored in ${join(repo, '.agents-hub')}/notes/*.md.\n\nStart by reviewing the board and relevant notes with the board_* MCP tools, or run agent-hub-board summary, then search '{"kind":"context"}' and read relevant Task and Context notes. If neither is available, read the Markdown files directly.\n\n${active ? `Active Task: ${active.id} ${active.title}. Read .agents-hub/notes/${active.id}.md and keep its status current.\n\n` : ''}Recent codebase context:\n${context.length ? context.map(note => `- ${note.id} ${note.title}: ${note.body.slice(0, 180)}`).join('\n') : '- None yet.'}\n\nUse the board as context while coding. At the end of a Task, update its outcome and acceptance checks and record one concise codebase learning with evidence paths in a Context note. Use board_complete_task (agent-hub-board complete-task) when available.`
   }
   private terminalResource(contextId: string, repo: string, args: Record<string, any>): TerminalResource {
     const kind: TerminalKind = ['shell', 'custom', 'codex', 'claude', 'cursor'].includes(args.terminalKind) ? args.terminalKind : 'shell'
@@ -232,6 +279,19 @@ export class HubService extends EventEmitter {
   }
   /** Author shown on the canvas for an agent's board changes. */
   private agentName(resource: TerminalResource) { return resource.name === resource.agent ? resource.agent : `${resource.agent} · ${resource.name}` }
+  /** Create a project from validated folders; the first is primary. A
+   *  folder with an existing repository board seeds the project's board. */
+  private createProject(input: Record<string, any>): Project {
+    const folders = projectFolders(input.folders)
+    if (!folders.length) throw new Error('Add at least one folder to the project.')
+    for (const folder of folders) this.repo(folder.path)
+    const legacy = folders.find(folder => existsSync(join(folder.path, '.agents-hub', 'notes')))?.path
+    const project = newProject(this.store.directory, { ...input, folders, importFrom: legacy }, this.store.state.projects.length)
+    this.store.state.projects.push(project)
+    for (const folder of folders) if (!this.store.state.repos.includes(folder.path)) this.store.state.repos.push(folder.path)
+    this.prepareBoard(project)
+    return project
+  }
   private contextForResource(id: string) { return this.store.state.contexts.find(context => context.terminals.some(resource => resource.id === id)) }
   async invoke(action: string, args: Record<string, any> = {}): Promise<any> {
     switch (action) {
@@ -259,19 +319,65 @@ export class HubService extends EventEmitter {
       }
       case 'selectContext': {
         const context = this.store.context(String(args.id))
-        this.store.state.selectedRepo = context.repo
-        ;(this.store.state.selectedContexts ??= {})[context.repo] = context.id
+        this.store.state.selectedProject = context.projectId
+        ;(this.store.state.selectedContexts ??= {})[context.projectId] = context.id
         this.flush(); return liveWorkspace(this.store.state)
       }
       case 'newContext': {
-        const repo = this.repo(args.repo)
+        // `project` names the project; a bare folder (`repo`) joins the
+        // project that holds it, or becomes a new one-folder project.
+        let project: Project
+        if (args.project) project = this.projectFrom(args.project)
+        else {
+          const folder = this.repo(args.repo)
+          project = this.store.state.projects.find(item => item.folders.some(entry => entry.path === folder)) ?? this.createProject({ folders: [folder] })
+        }
+        const primary = this.primaryFolder(project)
         const contextId = `ctx-${uuid()}`
-        const context = newContext(contextId, repo, this.contextName(repo, args.name), this.terminalResource(contextId, repo, args))
+        const context = newContext(contextId, project.id, primary, this.contextName(project.id, args.name), this.terminalResource(contextId, primary, args))
         this.store.state.contexts.push(context)
-        if (!this.store.state.repos.includes(repo)) this.store.state.repos.push(repo)
-        this.store.state.selectedRepo = repo
-        ;(this.store.state.selectedContexts ??= {})[repo] = context.id
+        this.store.state.selectedProject = project.id
+        ;(this.store.state.selectedContexts ??= {})[project.id] = context.id
         this.flush(); return context
+      }
+      case 'project:create': {
+        const project = this.createProject(args)
+        this.store.state.selectedProject = project.id
+        this.flush(); return project
+      }
+      case 'project:update': {
+        const project = this.store.project(String(args.id)), patch = args.patch ?? {}
+        if (typeof patch.name === 'string' && patch.name.trim()) project.name = patch.name.trim().slice(0, 80)
+        if (typeof patch.description === 'string') project.description = patch.description.trim().slice(0, 2000)
+        if (typeof patch.color === 'string' && /^#[0-9a-f]{6}$/i.test(patch.color)) project.color = patch.color.toLowerCase()
+        if (patch.folders !== undefined) {
+          const folders = projectFolders(patch.folders)
+          if (!folders.length) throw new Error('A project needs at least one folder.')
+          for (const folder of folders) this.repo(folder.path)
+          project.folders = folders
+        }
+        project.updatedAt = new Date().toISOString()
+        this.prepareBoard(project)
+        this.flush(); return project
+      }
+      case 'project:select': {
+        const project = this.store.project(String(args.id))
+        this.store.state.selectedProject = project.id
+        this.flush(); return liveWorkspace(this.store.state)
+      }
+      case 'project:delete': {
+        // Stops and removes the project's Sessions. The board is kept in the
+        // data directory under projects/deleted so nothing is lost.
+        const project = this.store.project(String(args.id))
+        for (const context of this.store.state.contexts.filter(item => item.projectId === project.id)) await this.invoke('deleteContext', { id: context.id })
+        this.store.state.projects = this.store.state.projects.filter(item => item.id !== project.id)
+        if (existsSync(project.boardRoot)) {
+          const archive = join(this.store.directory, 'projects', 'deleted')
+          mkdirSync(archive, { recursive: true })
+          renameSync(project.boardRoot, join(archive, `${project.id}-${Date.now()}`))
+        }
+        if (this.store.state.selectedProject === project.id) this.store.state.selectedProject = this.store.state.projects[0]?.id
+        this.flush(); return liveWorkspace(this.store.state)
       }
       case 'newTerminal': {
         const context = this.store.context(String(args.contextId))
@@ -284,11 +390,11 @@ export class HubService extends EventEmitter {
         const context = this.store.context(id)
         for (const resource of context.terminals) { this.terminals.stop(resource.id).catch(() => {}); this.activity.forget(resource.id); this.outbox.delete(resource.id) }
         this.store.state.contexts = this.store.state.contexts.filter(c => c.id !== id)
-        for (const [repo, selected] of Object.entries(this.store.state.selectedContexts ?? {})) {
+        for (const [projectId, selected] of Object.entries(this.store.state.selectedContexts ?? {})) {
           if (selected === id) {
-            const fallback = this.store.state.contexts.find(c => c.repo === repo)
-            if (fallback) this.store.state.selectedContexts![repo] = fallback.id
-            else delete this.store.state.selectedContexts![repo]
+            const fallback = this.store.state.contexts.find(c => c.projectId === projectId)
+            if (fallback) this.store.state.selectedContexts![projectId] = fallback.id
+            else delete this.store.state.selectedContexts![projectId]
           }
         }
         this.flush(); return null
@@ -307,11 +413,18 @@ export class HubService extends EventEmitter {
         const context = this.store.context(resource.contextId)
         const themeEnv = themeEnvironment(this.store.state.themeBackground, this.store.state.themeAccent)
         const existing = this.opens.get(resource.id); if (existing) return existing
+        const project = this.store.project(context.projectId)
+        const boardRoot = this.board(project.id)
+        // Agents start in the primary folder (or their task's worktree) and
+        // get every other project folder as an extra working directory.
+        const cwd = resource.cwd ?? this.primaryFolder(project)
+        const addDirs = project.folders.map(folder => folder.path).filter((path, index) => path !== cwd && !(resource.cwd && index === 0))
         const operation = (async () => {
           // The Session id lets board tools resolve the working Task on every
           // call, so a Task handed to an already-running agent is never stale.
           const boardEnv: Record<string, string> = {
-            ...themeEnv, AGENT_HUB_REPO: resource.repo, AGENT_HUB_SESSION_ID: context.id, AGENT_HUB_TERMINAL_ID: resource.id, AGENT_HUB_AGENT_NAME: this.agentName(resource),
+            ...themeEnv, AGENT_HUB_BOARD_ROOT: boardRoot, AGENT_HUB_REPO: boardRoot, AGENT_HUB_PROJECT: project.name, AGENT_HUB_PROJECT_FOLDERS: project.folders.map(folder => folder.path).join('\n'),
+            AGENT_HUB_SESSION_ID: context.id, AGENT_HUB_TERMINAL_ID: resource.id, AGENT_HUB_AGENT_NAME: this.agentName(resource),
             AGENT_HUB_BOARD_RUNTIME: process.execPath, ...(this.boardCliPath ? { AGENT_HUB_BOARD_CLI: this.boardCliPath } : {}),
             ...(this.boardBin ? { PATH: `${this.boardBin}${delimiter}${agentEnvironment().PATH}` } : {}),
           }
@@ -322,7 +435,8 @@ export class HubService extends EventEmitter {
             let hookUrl: string | undefined
             if (provider) { try { hookUrl = await this.events.urlFor(resource.id) } catch { /* state falls back to screen signals */ } }
             const plan = launchPlan(provider, profile?.args ?? [], {
-              repo: resource.repo, sessionId: context.id, terminalId: resource.id, agentName: this.agentName(resource), hookUrl, resumeId: resource.conversationId,
+              repo: boardRoot, sessionId: context.id, terminalId: resource.id, agentName: this.agentName(resource), hookUrl, resumeId: resource.conversationId,
+              addDirs, instructions: this.projectBrief(project, cwd),
               board: this.boardCliPath ? { runtime: process.execPath, cli: this.boardCliPath } : undefined,
             })
             if (profile) profile = { ...profile, args: plan.args }
@@ -330,7 +444,7 @@ export class HubService extends EventEmitter {
             if (resource.conversationId) this.resumes.set(resource.id, Date.now()); else this.resumes.delete(resource.id)
             this.activity.start(resource.id, { hooks: !!hookUrl, awaitReady: !!hookUrl && provider === 'claude' })
           }
-          const snapshot = await this.terminals.open(resource.id, resource.cwd ?? resource.repo, { kind: resource.terminalKind, profile, env: boardEnv, cols: args.cols, rows: args.rows })
+          const snapshot = await this.terminals.open(resource.id, cwd, { kind: resource.terminalKind, profile, env: boardEnv, cols: args.cols, rows: args.rows })
           resource.terminalRunning = snapshot.running
           resource.updatedAt = new Date().toISOString(); context.updatedAt = resource.updatedAt
           this.flush()
@@ -391,22 +505,22 @@ export class HubService extends EventEmitter {
         } else if (patch.contextId === '') patch.contextName = ''
         return this.ticketStore.update(repo, String(args.id), patch, typeof args.expectedUpdatedAt === 'string' ? args.expectedUpdatedAt : undefined)
       }
-      case 'board:load': return this.boardStore.load(this.repo(args.repo))
-      case 'board:query': return this.boardStore.query(this.repo(args.repo), args.query as BoardQuery)
-      case 'board:apply': return this.boardStore.apply(this.repo(args.repo), args.command as BoardCommand)
-      case 'board:image:add': return this.boardStore.saveImage(this.repo(args.repo), args.name, args.mime, args.base64)
-      case 'board:image:preview': return this.boardStore.imagePreview(this.repo(args.repo), args.id)
-      case 'board:organizer:get': return { config: this.organizer.config(this.repo(args.repo)), last: this.organizer.lastChange(this.repo(args.repo)) }
-      case 'board:organizer:save': return this.organizer.saveConfig(this.repo(args.repo), args.config)
-      case 'board:organizer:run': return this.organizer.run(this.repo(args.repo))
-      case 'board:organizer:undo': return this.organizer.undo(this.repo(args.repo))
+      case 'board:load': return this.boardStore.load(this.board(args.repo))
+      case 'board:query': return this.boardStore.query(this.board(args.repo), args.query as BoardQuery)
+      case 'board:apply': return this.boardStore.apply(this.board(args.repo), args.command as BoardCommand)
+      case 'board:image:add': return this.boardStore.saveImage(this.board(args.repo), args.name, args.mime, args.base64)
+      case 'board:image:preview': return this.boardStore.imagePreview(this.board(args.repo), args.id)
+      case 'board:organizer:get': return { config: this.organizer.config(this.board(args.repo)), last: this.organizer.lastChange(this.board(args.repo)) }
+      case 'board:organizer:save': return this.organizer.saveConfig(this.board(args.repo), args.config)
+      case 'board:organizer:run': return this.organizer.run(this.board(args.repo))
+      case 'board:organizer:undo': return this.organizer.undo(this.board(args.repo))
       case 'dictation:start': return this.dictation.start()
       case 'dictation:stop': return this.dictation.stop()
       case 'dictation:cancel': this.dictation.cancel(); return null
-      case 'board:briefing': return this.taskBriefing(this.repo(args.repo), String(args.id))
-      case 'board:freshness': { const repo = this.repo(args.repo); return contextFreshness(repo, this.boardStore.load(repo).notes) }
+      case 'board:briefing': return this.taskBriefing(this.board(args.repo), String(args.id))
+      case 'board:freshness': { const project = this.projectFrom(args.repo); return contextFreshness(project.folders.map(folder => folder.path), this.boardStore.load(this.board(project.id)).notes) }
       case 'board:answer': {
-        const repo = this.repo(args.repo), id = String(args.id)
+        const repo = this.board(args.repo), id = String(args.id)
         const before = this.boardStore.query(repo, { type: 'read', id }) as BoardNote | null
         const question = before?.question
         const note = this.boardStore.apply(repo, { type: 'answerQuestion', id, answer: String(args.answer ?? '') }) as BoardNote
@@ -419,7 +533,10 @@ export class HubService extends EventEmitter {
       }
       case 'board:fanout': {
         // One worktree, Session, and agent per open subtask, all at once.
-        const repo = this.repo(args.repo)
+        // Worktrees branch from the project's primary folder; the other
+        // folders stay shared through --add-dir.
+        const project = this.projectFrom(args.repo)
+        const repo = this.board(project.id), primary = this.primaryFolder(project)
         const parent = this.boardStore.query(repo, { type: 'read', id: String(args.taskId) }) as BoardNote | null
         if (!parent || parent.kind !== 'task') throw new Error('Task no longer exists.')
         const children = (this.boardStore.query(repo, { type: 'search', kind: 'task', limit: 100 }) as BoardNote[])
@@ -428,10 +545,10 @@ export class HubService extends EventEmitter {
         if (children.length > 8) throw new Error('Fan out at most 8 subtasks at once.')
         const started: Array<{ taskId: string; terminalId: string; branch: string }> = []
         for (const child of children) {
-          const worktree = createWorktree(repo, child.id, child.title)
+          const worktree = createWorktree(primary, child.id, child.title)
           const contextId = `ctx-${uuid()}`
-          const resource = this.terminalResource(contextId, repo, { ...args, cwd: worktree.path, terminalName: args.terminalName || undefined })
-          const context = newContext(contextId, repo, child.title.slice(0, 60), resource)
+          const resource = this.terminalResource(contextId, primary, { ...args, cwd: worktree.path, terminalName: args.terminalName || undefined })
+          const context = newContext(contextId, project.id, primary, child.title.slice(0, 60), resource)
           this.store.state.contexts.push(context)
           const updated = this.boardStore.apply(repo, { type: 'updateNote', id: child.id, expectedRevision: child.revision, patch: { worktree, updatedBy: 'person' } }) as BoardNote
           this.flush()
@@ -442,24 +559,24 @@ export class HubService extends EventEmitter {
         return { started }
       }
       case 'board:worktree:status': {
-        const repo = this.repo(args.repo)
-        const tasks = (this.boardStore.load(repo).notes).filter(note => note.worktree)
-        return Object.fromEntries(tasks.map(note => { try { return [note.id, worktreeStatus(repo, note.worktree!)] } catch { return [note.id, null] } }))
+        const project = this.projectFrom(args.repo), primary = project.folders[0]?.path
+        const tasks = (this.boardStore.load(this.board(project.id)).notes).filter(note => note.worktree)
+        return Object.fromEntries(tasks.map(note => { try { return [note.id, primary ? worktreeStatus(primary, note.worktree!) : null] } catch { return [note.id, null] } }))
       }
       case 'board:worktree:remove': {
-        const repo = this.repo(args.repo)
+        const project = this.projectFrom(args.repo), repo = this.board(project.id)
         const task = this.boardStore.query(repo, { type: 'read', id: String(args.taskId) }) as BoardNote | null
         if (!task?.worktree) throw new Error('This task has no worktree.')
         const owner = this.store.state.contexts.find(context => context.terminals.some(terminal => terminal.cwd === task.worktree!.path))
         if (owner) for (const terminal of owner.terminals) if (this.terminals.running(terminal.id)) await this.terminals.stop(terminal.id)
-        removeWorktree(repo, task.worktree, args.force === true)
+        removeWorktree(this.primaryFolder(project), task.worktree, args.force === true)
         return this.boardStore.apply(repo, { type: 'appendLog', id: task.id, actor: 'person', text: `Removed worktree ${task.worktree.path}; branch ${task.worktree.branch} is kept.` })
       }
       case 'board:dispatch': {
         // Hand a Task to one agent terminal: assign it to that terminal's
         // Session, mark it working, start the agent if needed, and type the
         // briefing in once the agent is idle.
-        const repo = this.repo(args.repo)
+        const repo = this.board(args.repo)
         const resource = this.store.resource(String(args.terminalId))
         if (resource.terminalKind === 'shell') throw new Error('Choose an agent terminal. A shell cannot receive a briefing.')
         const task = this.boardStore.query(repo, { type: 'read', id: String(args.taskId) }) as BoardNote | null
@@ -475,7 +592,7 @@ export class HubService extends EventEmitter {
         if (resource.terminalKind === 'shell') throw new Error('Choose an agent terminal, or copy the text into a shell.')
         return await this.deliver(resource.id, String(args.text ?? ''))
       }
-      case 'board:handoff': return this.boardBriefing(this.repo(args.repo), String(args.sessionId))
+      case 'board:handoff': return this.boardBriefing(this.board(args.repo), String(args.sessionId))
       case 'preferences': {
         let themeChanged = false
         if (['dark', 'light', 'system'].includes(args.theme)) {

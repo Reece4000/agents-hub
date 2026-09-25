@@ -1,5 +1,5 @@
 import { readFileSync, realpathSync, statSync } from 'node:fs'
-import { basename, extname, isAbsolute, resolve } from 'node:path'
+import { basename, extname, isAbsolute, join, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { BoardStore } from './board-store'
 import { contextFreshness } from './freshness'
@@ -30,6 +30,16 @@ export class BoardAgent {
     this.identity = identity
   }
   close() { this.store.close() }
+  /** The project's folders, from the project.json Agent Hub keeps beside
+   *  the board. A board without one (a repository board) is its own folder. */
+  folders(): string[] {
+    try {
+      const project = JSON.parse(readFileSync(join(this.repo, 'project.json'), 'utf8')) as { folders?: Array<{ path?: unknown }> }
+      const folders = (project.folders ?? []).map(folder => folder.path).filter((path): path is string => typeof path === 'string' && isAbsolute(path))
+      if (folders.length) return folders
+    } catch { /* not a project board */ }
+    return [this.repo]
+  }
   activeTask(): BoardNote | null {
     if (!this.identity.sessionId) return null
     const working = this.store.query(this.repo, { type: 'search', kind: 'task', limit: 100 }) as BoardNote[]
@@ -48,7 +58,7 @@ export class BoardAgent {
   /** Flag context notes whose evidence changed after they were verified, so
    *  agents know which facts to check before relying on them. */
   private withFreshness(notes: BoardNote[]) {
-    const freshness = contextFreshness(this.repo, notes)
+    const freshness = contextFreshness(this.folders(), notes)
     return notes.map(note => freshness[note.id]?.stale ? { ...note, stale: true, staleReasons: freshness[note.id].reasons } : note)
   }
   call(name: string, args: Args = {}): unknown {
@@ -94,7 +104,7 @@ export class BoardAgent {
       case 'board_attach_image': {
         const id = this.target(args)
         const raw = required(args.path, 'path')
-        const path = isAbsolute(raw) ? raw : resolve(this.repo, raw)
+        const path = isAbsolute(raw) ? raw : resolve(this.folders()[0], raw)
         const mime = IMAGE_TYPES[extname(path).toLowerCase()]
         if (!mime) throw new Error('Attach a PNG, JPEG, WebP, or GIF image.')
         if (statSync(path).size > 20 * 1024 * 1024) throw new Error('Images must be smaller than 20 MB.')
@@ -139,7 +149,7 @@ export const boardTools = [
   { name: 'board_ask', description: 'Ask the person a question about a Task when you need a decision you cannot make yourself. The Task becomes blocked and the question appears on its card; the answer is typed into this terminal when the person replies, so end your turn after asking.', inputSchema: { type: 'object', properties: { id: optionalTask, question: { type: 'string' }, options: { type: 'array', items: { type: 'string' }, description: 'Up to 8 suggested answers.' } }, required: ['question'] } },
   { name: 'board_create_note', description: 'Create a Task or Note on the canvas. Use parentId to split a Task into smaller Tasks; they appear beside their parent. Use kind "note" for questions, hypotheses, and observations worth keeping.', inputSchema: { type: 'object', properties: { kind: { type: 'string', enum: ['task', 'note'] }, title: { type: 'string' }, body: { type: 'string' }, acceptance: { type: 'array', items: { type: 'string' } }, parentId: { type: 'string' }, linkTo: { type: 'array', items: { type: 'string' } } }, required: ['kind', 'title'] } },
   { name: 'board_link_notes', description: 'Link two notes. kind "depends_on" means `from` cannot finish before `to`.', inputSchema: { type: 'object', properties: { from: id, to: id, kind: { type: 'string', enum: ['relates_to', 'depends_on'] } }, required: ['from', 'to'] } },
-  { name: 'board_attach_image', description: 'Attach a PNG, JPEG, WebP, or GIF file (for example a screenshot of your change) to a Task or Note.', inputSchema: { type: 'object', properties: { id: optionalTask, path: { type: 'string', description: 'Absolute path, or relative to the repository root.' }, description: { type: 'string' } }, required: ['path'] } },
+  { name: 'board_attach_image', description: 'Attach a PNG, JPEG, WebP, or GIF file (for example a screenshot of your change) to a Task or Note.', inputSchema: { type: 'object', properties: { id: optionalTask, path: { type: 'string', description: 'Absolute path, or relative to the project\'s primary folder.' }, description: { type: 'string' } }, required: ['path'] } },
   { name: 'board_update_task', description: 'Update task progress with optimistic revision checking. Read it again after a conflict.', inputSchema: { type: 'object', properties: { id, expectedRevision: { type: 'string' }, status: { type: 'string', enum: ['open', 'working', 'blocked'] }, title: { type: 'string' }, body: { type: 'string' }, outcome: { type: 'string' }, acceptance: { type: 'array', items: { type: 'string' } }, sessionId: { type: 'string' } }, required: ['id', 'expectedRevision'] } },
   { name: 'board_upsert_context', description: 'Create or revise a concise codebase fact with evidence paths. Search for an existing fact on the same subject first and update it instead of creating a near-duplicate. For updates provide ID and expectedRevision.', inputSchema: { type: 'object', properties: { id, expectedRevision: { type: 'string' }, title: { type: 'string' }, subject: { type: 'string' }, body: { type: 'string' }, evidence: { type: 'array', items: { type: 'object', properties: { path: { type: 'string' }, detail: { type: 'string' } }, required: ['path'] } } }, required: ['title', 'subject', 'body', 'evidence'] } },
   { name: 'board_complete_task', description: 'Finish a task and atomically journal its durable learning. Provide a contextChanges entry with a concise codebase fact and evidence, or noLearningReason.', inputSchema: { type: 'object', properties: { id, expectedRevision: { type: 'string' }, outcome: { type: 'string' }, acceptance: { type: 'array', items: { type: 'string' } }, contextChanges: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, expectedRevision: { type: 'string' }, title: { type: 'string' }, subject: { type: 'string' }, body: { type: 'string' }, evidence: { type: 'array', items: { type: 'object', properties: { path: { type: 'string' }, detail: { type: 'string' } }, required: ['path'] } } }, required: ['title', 'subject', 'body', 'evidence'] } }, noLearningReason: { type: 'string' }, operationId: { type: 'string' } }, required: ['id', 'expectedRevision', 'outcome'] } },

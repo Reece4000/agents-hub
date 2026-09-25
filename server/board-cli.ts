@@ -3,7 +3,9 @@ import { BoardAgent, boardTools } from './board-agent'
 
 const write = (value: unknown) => process.stdout.write(`${JSON.stringify(value)}\n`)
 const args = process.argv.slice(2)
-const repo = process.env.AGENT_HUB_REPO || process.cwd()
+// The project board root Agent Hub gives each terminal; AGENT_HUB_REPO is
+// the older name for it.
+const repo = process.env.AGENT_HUB_BOARD_ROOT || process.env.AGENT_HUB_REPO || process.cwd()
 let agent: BoardAgent
 try { agent = new BoardAgent(repo, undefined, { sessionId: process.env.AGENT_HUB_SESSION_ID, terminalId: process.env.AGENT_HUB_TERMINAL_ID, actor: process.env.AGENT_HUB_AGENT_NAME }) }
 catch (error) { process.stderr.write(`${(error as Error).message}\n`); process.exit(1) }

@@ -28,16 +28,40 @@ export interface TerminalResource {
   conversationId?: string;
   createdAt: string; updatedAt: string;
 }
-/** A durable group of terminals for one workspace task or area of work. */
+/** A durable group of terminals for one piece of work in a project. */
 export interface RepoContext {
-  id: string; repo: string; name: string; terminals: TerminalResource[];
+  id: string;
+  /** The project this Session belongs to. */
+  projectId: string;
+  /** The project's primary folder when the Session was created. */
+  repo: string;
+  name: string; terminals: TerminalResource[];
+  createdAt: string; updatedAt: string;
+}
+/** One folder in a project, with an optional label and note for agents. */
+export interface ProjectFolder { path: string; label?: string; note?: string }
+/** A user-defined set of folders that agents work across. The first folder
+ *  is primary: agents start there and get the others as extra directories.
+ *  The project's board lives in Agent Hub's data directory at `boardRoot`. */
+export interface Project {
+  id: string; name: string; description: string; color: string;
+  folders: ProjectFolder[];
+  /** Directory holding this project's `.agents-hub` board. */
+  boardRoot: string;
+  /** A repository board to copy in on first use (migrated folders). */
+  importFrom?: string;
   createdAt: string; updatedAt: string;
 }
 export interface Viewport { x: number; y: number; zoom: number }
 export interface Workspace {
-  version: 2; repos: string[]; contexts: RepoContext[]; selectedRepo: string;
-  /** Per-repository selected context id, so switching repos restores each
-   *  repo's active tab. Absent entries fall back to the repo's first context. */
+  version: 2;
+  projects: Project[];
+  selectedProject?: string;
+  /** Folders seen in the file browser, and the one selected there. */
+  repos: string[]; selectedRepo: string;
+  contexts: RepoContext[];
+  /** Per-project selected Session id, so switching projects restores each
+   *  project's active tab. Absent entries fall back to the first Session. */
   selectedContexts?: Record<string, string>;
   viewports: Record<string, Viewport>; theme: 'dark' | 'light' | 'system';
   /** Custom theme colours (normalized `#rrggbb`). Background themes the

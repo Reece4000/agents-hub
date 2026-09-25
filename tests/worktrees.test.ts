@@ -19,14 +19,16 @@ test('fan-out gives each open subtask its own worktree, branch, Session, and age
   service.terminals.open = (async (_id: string, cwd: string) => { opened.push(cwd); return { data: '', seq: 0, cols: 90, rows: 28, running: true } }) as typeof service.terminals.open
   try {
     git(repo, 'init', '-q'); writeFileSync(join(repo, 'app.ts'), 'export const a = 1\n'); git(repo, 'add', '.'); git(repo, 'commit', '-qm', 'init')
-    service.boardStore.load(repo)
-    const parent = service.boardStore.apply(repo, { type: 'createNote', note: { kind: 'task', title: 'Ship the drawer' } }) as BoardNote
-    const make = (title: string) => service.boardStore.apply(repo, { type: 'createNote', note: { kind: 'task', title, parentId: parent.id, links: [{ to: parent.id, kind: 'relates_to' }] } }) as BoardNote
+    const project = await service.invoke('project:create', { name: 'Drawer', folders: [repo] })
+    const board = project.boardRoot
+    service.boardStore.load(board)
+    const parent = service.boardStore.apply(board, { type: 'createNote', note: { kind: 'task', title: 'Ship the drawer' } }) as BoardNote
+    const make = (title: string) => service.boardStore.apply(board, { type: 'createNote', note: { kind: 'task', title, parentId: parent.id, links: [{ to: parent.id, kind: 'relates_to' }] } }) as BoardNote
     const first = make('Resize handle'), second = make('Keyboard toggle')
     await assert.rejects(service.invoke('board:fanout', { repo, taskId: first.id, terminalKind: 'custom', profile: { label: 'Env', executable: '/usr/bin/env', args: [] } }), /no open subtasks/)
     const result = await service.invoke('board:fanout', { repo, taskId: parent.id, terminalKind: 'custom', profile: { label: 'Env', executable: '/usr/bin/env', args: [] } })
     assert.equal(result.started.length, 2)
-    const child = service.boardStore.query(repo, { type: 'read', id: first.id }) as BoardNote
+    const child = service.boardStore.query(board, { type: 'read', id: first.id }) as BoardNote
     assert.ok(child.worktree && existsSync(child.worktree.path) && child.worktree.path.startsWith(join(repo, WORKTREE_DIR)))
     assert.equal(git(child.worktree!.path, 'rev-parse', '--abbrev-ref', 'HEAD'), child.worktree!.branch)
     assert.equal(child.status, 'working')
@@ -36,7 +38,7 @@ test('fan-out gives each open subtask its own worktree, branch, Session, and age
     assert.equal(session.terminals[0].cwd, child.worktree!.path)
     assert.match(readFileSync(join(repo, '.git', 'info', 'exclude'), 'utf8'), /\/\.agent-worktrees\//)
     assert.doesNotMatch(git(repo, 'status', '--porcelain', '--untracked-files=all'), /agent-worktrees/, 'worktrees never show as untracked in the main checkout')
-    assert.match((service.boardStore.query(repo, { type: 'read', id: parent.id }) as BoardNote).log?.at(-1)?.text ?? '', /Fanned out 2 subtasks/)
+    assert.match((service.boardStore.query(board, { type: 'read', id: parent.id }) as BoardNote).log?.at(-1)?.text ?? '', /Fanned out 2 subtasks/)
 
     writeFileSync(join(child.worktree!.path, 'app.ts'), 'export const a = 2\nexport const b = 3\n')
     git(child.worktree!.path, 'commit', '-qam', 'change')

@@ -38,7 +38,10 @@ test('a custom agent opens with its executable, argv, and board environment', ()
   assert.equal(calls[0].repo, dir)
   assert.equal(calls[0].spec.kind, 'custom')
   assert.deepEqual(calls[0].spec.profile, { label: 'Env', executable: '/usr/bin/env', args: ['--help'] })
-  assert.equal(calls[0].spec.env?.AGENT_HUB_REPO, dir)
+  const project = service.store.state.projects[0]
+  assert.deepEqual(project.folders.map(folder => folder.path), [dir], 'a bare folder becomes a one-folder project')
+  assert.equal(calls[0].spec.env?.AGENT_HUB_BOARD_ROOT, project.boardRoot)
+  assert.equal(calls[0].spec.env?.AGENT_HUB_PROJECT_FOLDERS, dir)
   assert.equal(service.store.resource(context.terminals[0].id).terminalRunning, true)
 }))
 

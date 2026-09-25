@@ -33,19 +33,21 @@ const imagesList = (value: unknown): BoardImage[] => Array.isArray(value) ? valu
 interface Layout { version: 1; sections: BoardSection[]; positions: Record<string, BoardPosition> }
 interface CompletionJournal { command: Extract<BoardCommand, { type: 'completeTask' }>; changes: Array<Extract<BoardCommand, { type: 'completeTask' }>['contextChanges'][number] & { id: string }>; completed: string[] }
 
-/** Repo files are the authority. The renderer and agents use this same module
- * for parsing, optimistic writes, migration, search, and completion. */
-/** `passive` stores serve short-lived agent processes (the board CLI and
- *  MCP server): they never rewrite repo instruction files or start watchers.
- *  The desktop app's active store owns both. */
 /** Generated agent guide at `.agents-hub/README.md`. Earlier generated
  *  versions (by content hash) are upgraded in place; a guide someone edited
  *  is left alone. */
-const BOARD_GUIDE = "# Agent Hub board\n\nThe Tasks canvas is shared repo memory. Read `.agents-hub/notes/*.md` for tasks, notes, and codebase context. Each note has JSON metadata between `---` lines and a Markdown body. `.agents-hub/canvas.json` holds only spatial layout.\n\nIn an Agent Hub terminal the board is available two ways:\n\n- MCP tools named `board_*` (Claude Code and Codex terminals are configured automatically).\n- The `agent-hub-board` command: `agent-hub-board summary`, then `search`, `read`, or `related` with one JSON argument, e.g. `agent-hub-board search '{\"kind\":\"context\",\"text\":\"database\"}'`.\n\nStart with `board_summary`. Its `activeTask` is the Task your Session is working on; read it, search for related Context notes, and keep its status current. While you work:\n\n- `board_log_progress` (`agent-hub-board log \"\u2026\"`) adds a line to the Task's timeline on the person's canvas. Log meaningful steps, not every action.\n- `board_ask` (`agent-hub-board ask \"\u2026\"`) puts a question on the Task's card when you need a decision. End your turn after asking; the answer is typed into your terminal.\n- `board_create_note` splits work into subtasks (`parentId`) or records a note; `board_link_notes` relates notes; `board_attach_image` adds a screenshot.\n\n`board_update_task` and `board_complete_task` take the `expectedRevision` from a fresh read; read again if another writer changed a note.\n\nOn completion, record the outcome and checked acceptance criteria with `board_complete_task` (`agent-hub-board complete-task`), capturing one concise, evidence-backed codebase fact in a Context note. Give a no-learning reason only when nothing durable was learned. Without the board tools, read these Markdown files directly and leave edits to an Agent Hub terminal.\n\nOld `.agents-hub/tickets/*.json` files are preserved as migration sources. Edit the new note files for current Tasks.\n"
-const LEGACY_GUIDES = new Set(['a68f753f44377687f07b77cad8a5805b54d6065d432a026aa0440bbdb7b57b72', 'd418fcfb1107feab0dc9f50f86a26a19b0d7a919a96b3c699bcc5bc92f6c13a8'])
+const BOARD_GUIDE = "# Agent Hub board\n\nThis is an Agent Hub project board: the shared memory for a project's tasks, notes, and codebase context. `project.json` beside this folder lists the project's folders. Each note in `notes/*.md` has JSON metadata between `---` lines and a Markdown body; `canvas.json` holds only spatial layout. Evidence paths in context notes are absolute or relative to the project's primary folder.\n\nIn an Agent Hub terminal the board is available two ways:\n\n- MCP tools named `board_*` (Claude Code and Codex terminals are configured automatically).\n- The `agent-hub-board` command: `agent-hub-board summary`, then `search`, `read`, or `related` with one JSON argument, e.g. `agent-hub-board search '{\"kind\":\"context\",\"text\":\"database\"}'`.\n\nStart with `board_summary`. Its `activeTask` is the Task your Session is working on; read it, search for related Context notes, and keep its status current. While you work:\n\n- `board_log_progress` (`agent-hub-board log \"\u2026\"`) adds a line to the Task's timeline on the person's canvas. Log meaningful steps, not every action.\n- `board_ask` (`agent-hub-board ask \"\u2026\"`) puts a question on the Task's card when you need a decision. End your turn after asking; the answer is typed into your terminal.\n- `board_create_note` splits work into subtasks (`parentId`) or records a note; `board_link_notes` relates notes; `board_attach_image` adds a screenshot.\n\n`board_update_task` and `board_complete_task` take the `expectedRevision` from a fresh read; read again if another writer changed a note.\n\nOn completion, record the outcome and checked acceptance criteria with `board_complete_task` (`agent-hub-board complete-task`), capturing one concise, evidence-backed codebase fact in a Context note. Give a no-learning reason only when nothing durable was learned. Without the board tools, read these Markdown files directly and leave edits to an Agent Hub terminal.\n\nOld `.agents-hub/tickets/*.json` files are preserved as migration sources. Edit the new note files for current Tasks.\n"
+const LEGACY_GUIDES = new Set(['83bc41936dd9a8857ca1b82b03f4be738d600e739424608a6a2133eb6d178121', 'a68f753f44377687f07b77cad8a5805b54d6065d432a026aa0440bbdb7b57b72', 'd418fcfb1107feab0dc9f50f86a26a19b0d7a919a96b3c699bcc5bc92f6c13a8'])
 
-export interface BoardStoreOptions { passive?: boolean }
+/** `passive` stores serve short-lived agent processes (the board CLI and
+ *  MCP server): they never start watchers. `repoInstructions` maintains an
+ *  Agent Hub block in AGENTS.md, CLAUDE.md, and GEMINI.md beside a board
+ *  that lives in a repository; project boards live in the app's data
+ *  directory, so the app leaves repositories alone. */
+export interface BoardStoreOptions { passive?: boolean; repoInstructions?: boolean }
 
+/** Board files are the authority. The renderer and agents use this same module
+ * for parsing, optimistic writes, migration, search, and completion. */
 export class BoardStore extends EventEmitter {
   constructor(private options: BoardStoreOptions = {}) { super() }
   private watchers = new Map<string, FSWatcher[]>()
@@ -292,7 +294,7 @@ export class BoardStore extends EventEmitter {
     let readOnly = false
     try { accessSync(existsSync(p.hub) ? p.hub : p.root, constants.W_OK); this.ensure(repo) }
     catch (error) { readOnly = true; errors.push(`Board is read-only: ${(error as Error).message}`) }
-    if (!readOnly && !this.options.passive) errors.push(...this.ensureAgentInstructions(p.root).map(error => `Agent instructions: ${error}`))
+    if (!readOnly && !this.options.passive && this.options.repoInstructions) errors.push(...this.ensureAgentInstructions(p.root).map(error => `Agent instructions: ${error}`))
     if (!readOnly) try {
       const unlock = this.heldLocks.has(repo) ? null : this.lock(repo)
       try { errors.push(...this.migrate(repo)) } finally { unlock?.() }
