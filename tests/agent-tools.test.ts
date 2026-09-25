@@ -1,0 +1,149 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { BoardStore } from '../server/board-store'
+import { BoardAgent } from '../server/board-agent'
+import { HubService } from '../server/service'
+import type { BoardNote } from '../shared/board'
+
+const withBoard = (run: (repo: string, store: BoardStore) => void | Promise<void>) => async () => {
+  const repo = mkdtempSync(join(tmpdir(), 'agent-hub-tools-'))
+  const store = new BoardStore()
+  try { store.load(repo); await run(repo, store) } finally { store.close(); rmSync(repo, { recursive: true, force: true }) }
+}
+const task = (store: BoardStore, repo: string, patch: Partial<BoardNote> = {}) =>
+  store.apply(repo, { type: 'createNote', note: { kind: 'task', title: 'Ship hooks', status: 'working', sessionId: 'ctx-1', ...patch } }) as BoardNote
+
+test('agents log progress, ask, and create linked subtasks on their active Task without revisions', withBoard((repo, store) => {
+  const parent = task(store, repo)
+  const agent = new BoardAgent(repo, undefined, { sessionId: 'ctx-1', terminalId: 'res-9', actor: 'Claude Code' })
+  try {
+    agent.call('board_log_progress', { text: 'Found the cause in terminals.ts' })
+    const child = agent.call('board_create_note', { kind: 'task', title: 'Cover OSC 9 parsing', parentId: parent.id, acceptance: ['Unit test for OSC 9'] }) as BoardNote
+    assert.equal(child.parentId, parent.id)
+    assert.deepEqual(child.links, [{ to: parent.id, kind: 'relates_to' }])
+    assert.equal(child.updatedBy, 'Claude Code')
+    agent.call('board_link_notes', { from: parent.id, to: child.id, kind: 'depends_on' })
+    const asked = agent.call('board_ask', { question: 'Keep the legacy flag?', options: ['Keep', 'Drop'] }) as BoardNote
+    assert.equal(asked.status, 'blocked')
+    assert.deepEqual(asked.question && { text: asked.question.text, options: asked.question.options, askedBy: asked.question.askedBy, terminalId: asked.question.terminalId }, { text: 'Keep the legacy flag?', options: ['Keep', 'Drop'], askedBy: 'Claude Code', terminalId: 'res-9' })
+    const summary = agent.call('board_summary') as { activeTask: { id: string; question?: string } }
+    assert.deepEqual(summary.activeTask, { id: parent.id, title: 'Ship hooks', status: 'blocked', question: 'Keep the legacy flag?' }, 'a blocked Task stays active')
+    const answered = store.apply(repo, { type: 'answerQuestion', id: parent.id, answer: 'Drop it' }) as BoardNote
+    assert.equal(answered.question, undefined)
+    assert.equal(answered.status, 'working')
+    assert.deepEqual(answered.log?.map(entry => `${entry.actor}: ${entry.text}`), ['Claude Code: Found the cause in terminals.ts', 'Claude Code: Asked: Keep the legacy flag?', 'person: Answered: Drop it'])
+    assert.ok(answered.links.some(link => link.to === child.id && link.kind === 'depends_on'))
+    const reread = store.query(repo, { type: 'read', id: parent.id }) as BoardNote
+    assert.equal(reread.log?.length, 3, 'progress survives a reload from disk')
+  } finally { agent.close() }
+}))
+
+test('tools that default to the active Task explain what to do without one', withBoard(repo => {
+  const agent = new BoardAgent(repo, undefined, { sessionId: 'nobody' })
+  try { assert.throws(() => agent.call('board_log_progress', { text: 'x' }), /No active Task for this Session/) } finally { agent.close() }
+}))
+
+test('agents attach screenshots as board images', withBoard(repo => {
+  const png = Buffer.from('89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d4944415478da63f8cfc0f01f0005000201a5d1a8f40000000049454e44ae426082', 'hex')
+  writeFileSync(join(repo, 'shot.png'), png)
+  const agent = new BoardAgent(repo, undefined, {})
+  try {
+    const note = agent.call('board_create_note', { kind: 'note', title: 'Before/after' }) as BoardNote
+    const updated = agent.call('board_attach_image', { id: note.id, path: 'shot.png', description: 'New tab states' }) as BoardNote
+    assert.equal(updated.images?.[0].description, 'New tab states')
+    assert.match(updated.images?.[0].path ?? '', /^\.agents-hub\/assets\/.+\.png$/)
+    assert.throws(() => agent.call('board_attach_image', { id: note.id, path: 'notes.txt' }), /PNG, JPEG/)
+  } finally { agent.close() }
+}))
+
+test('a stale editor save merges with an agent\'s progress instead of conflicting', withBoard((repo, store) => {
+  const note = task(store, repo)
+  store.apply(repo, { type: 'appendLog', id: note.id, actor: 'Codex', text: 'Tests pass' })
+  const merged = store.apply(repo, { type: 'updateNote', id: note.id, expectedRevision: note.revision, patch: { title: note.title, body: 'Sharper brief', links: note.links, updatedBy: 'person' } }) as BoardNote
+  assert.equal(merged.body, 'Sharper brief')
+  assert.equal(merged.log?.[0].text, 'Tests pass', 'the agent entry survives the person\'s edit')
+  const latest = store.query(repo, { type: 'read', id: note.id }) as BoardNote
+  store.apply(repo, { type: 'updateNote', id: note.id, expectedRevision: latest.revision, patch: { body: 'Agent rewrite', updatedBy: 'agent' } })
+  assert.throws(() => store.apply(repo, { type: 'updateNote', id: note.id, expectedRevision: latest.revision, patch: { body: 'Person rewrite', updatedBy: 'person' } }), /changed on disk/, 'both sides changing one field still conflicts')
+}))
+
+test('answers and briefings wait in an outbox until the agent is idle', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'agent-hub-outbox-'))
+  const service = new HubService(dir, dir)
+  const writes: string[] = []
+  try {
+    const context = await service.invoke('newContext', { repo: dir, name: 'ops', terminalKind: 'custom', profile: { label: 'Env', executable: '/usr/bin/env', args: [] } })
+    const id = context.terminals[0].id
+    service.terminals.running = () => true
+    service.terminals.write = (_id: string, data: string) => { writes.push(data) }
+    service.activity.start(id, { hooks: true })
+    service.activity.hook(id, { hook_event_name: 'UserPromptSubmit' })
+    assert.equal(await service.deliver(id, 'Answer: drop it'), 'queued')
+    assert.deepEqual(writes, [], 'nothing is typed while the agent works')
+    service.activity.hook(id, { hook_event_name: 'Stop' })
+    await new Promise(resolve => setTimeout(resolve, 700))
+    assert.deepEqual(writes, ['\x1b[200~Answer: drop it\x1b[201~', '\r'])
+  } finally { service.close(); rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('dispatch assigns a Task to an agent terminal, starts it, and queues the briefing', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'agent-hub-dispatch-'))
+  const service = new HubService(dir, dir)
+  let opened = 0
+  service.terminals.open = (async () => { opened++; return { data: '', seq: 0, cols: 90, rows: 28, running: true } }) as typeof service.terminals.open
+  try {
+    const context = await service.invoke('newContext', { repo: dir, name: 'backend', terminalKind: 'custom', terminalName: 'Reviewer', profile: { label: 'Env', executable: '/usr/bin/env', args: [] } })
+    const terminal = context.terminals[0]
+    const board = service.store.state.projects[0].boardRoot
+    service.boardStore.load(board)
+    const task = service.boardStore.apply(board, { type: 'createNote', note: { kind: 'task', title: 'Review the drawer' } }) as BoardNote
+    const result = await service.invoke('board:dispatch', { repo: dir, taskId: task.id, terminalId: terminal.id })
+    assert.equal(opened, 1, 'a stopped agent is started')
+    assert.equal(result.delivery, 'queued', 'the briefing waits for the agent to be idle')
+    assert.deepEqual([result.note.sessionId, result.note.status, result.note.agent], [context.id, 'working', 'Env · Reviewer'])
+    const shell = await service.invoke('newTerminal', { contextId: context.id, terminalKind: 'shell' })
+    await assert.rejects(service.invoke('board:dispatch', { repo: dir, taskId: task.id, terminalId: shell.id }), /shell cannot receive/)
+  } finally { service.close(); rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('a context pack gives an agent each selected note\'s essentials', async () => {
+  const { contextPack } = await import('../src/contextPack')
+  const base = { createdAt: '', updatedAt: '', updatedBy: 'person', revision: '', sectionId: '', links: [], body: '' }
+  const text = contextPack([
+    { ...base, id: 'AH-000000000001', kind: 'task', title: 'Ship drawer', status: 'working', body: 'Dock terminals', acceptance: ['Opens with ⌘J'], question: { text: 'Left or right?', askedBy: 'Codex', askedAt: '' } },
+    { ...base, id: 'AH-000000000002', kind: 'context', title: 'Drawer width', body: 'Persisted per viewer', evidence: [{ path: 'src/AgentDrawer.tsx' }] },
+  ])
+  assert.match(text, /^Context from the Agent Hub board: 2 notes/)
+  assert.match(text, /### Task AH-000000000001: Ship drawer \(working\)\nDock terminals\nAcceptance:\n- Opens with ⌘J\nOpen question: Left or right\?/)
+  assert.match(text, /### Codebase context AH-000000000002: Drawer width\nPersisted per viewer\nEvidence: src\/AgentDrawer.tsx/)
+})
+
+test('queued messages wait while a startup prompt is on screen, and Claude waits for SessionStart', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'agent-hub-prompt-'))
+  const service = new HubService(dir, dir)
+  const writes: string[] = []
+  try {
+    const context = await service.invoke('newContext', { repo: dir, name: 'ops', terminalKind: 'custom', profile: { label: 'Env', executable: '/usr/bin/env', args: [] } })
+    const id = context.terminals[0].id
+    let screen = 'Quick safety check: Is this a project you trust?\n❯ No, exit\n  Yes, I trust this folder\nEnter to confirm · Esc to cancel'
+    service.terminals.running = () => true
+    service.terminals.peek = async () => screen
+    service.terminals.write = (_id: string, data: string) => { writes.push(data) }
+    service.activity.start(id, { hooks: true, awaitReady: true })
+    service.activity.output(id)
+    await new Promise(resolve => setTimeout(resolve, 2100))
+    assert.deepEqual([service.activity.get(id)?.state, service.activity.get(id)?.detail], ['waiting', 'Answer the prompt in the terminal'], 'a quiet start before SessionStart is a prompt, not idle')
+    assert.equal(await service.deliver(id, 'Work on the task'), 'queued')
+    service.activity.hook(id, { hook_event_name: 'Stop' })
+    await new Promise(resolve => setTimeout(resolve, 600))
+    assert.deepEqual(writes, [], 'nothing is typed into a dialog')
+    assert.equal(service.activity.get(id)?.state, 'waiting')
+    screen = '> '
+    service.activity.hook(id, { hook_event_name: 'SessionStart' })
+    await new Promise(resolve => setTimeout(resolve, 700))
+    assert.deepEqual(writes, ['\x1b[200~Work on the task\x1b[201~', '\r'])
+  } finally { service.close(); rmSync(dir, { recursive: true, force: true }) }
+})

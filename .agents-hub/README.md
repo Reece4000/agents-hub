@@ -2,8 +2,19 @@
 
 The Tasks canvas is shared repo memory. Read `.agents-hub/notes/*.md` for tasks, notes, and codebase context. Each note has JSON metadata between `---` lines and a Markdown body. `.agents-hub/canvas.json` holds only spatial layout.
 
-Start with a board summary, search for related Context notes, and read the active task. In Agent Hub terminals, `AGENT_HUB_REPO`, `AGENT_HUB_ACTIVE_TASK_ID`, `AGENT_HUB_BOARD_RUNTIME`, and `AGENT_HUB_BOARD_CLI` point to the board. Run `ELECTRON_RUN_AS_NODE=1 "$AGENT_HUB_BOARD_RUNTIME" "$AGENT_HUB_BOARD_CLI" summary` and use `search`, `read`, or `related` with a JSON argument. The same executable with `mcp` serves board tools over stdio.
+In an Agent Hub terminal the board is available two ways:
 
-Keep task status current. On completion, record outcome and checked acceptance criteria. Capture a concise codebase fact with evidence paths in a Context note using `complete-task`; give a no-learning reason only when nothing durable was learned. Commands check `expectedRevision`; read again if another writer changed a note.
+- MCP tools named `board_*` (Claude Code and Codex terminals are configured automatically).
+- The `agent-hub-board` command: `agent-hub-board summary`, then `search`, `read`, or `related` with one JSON argument, e.g. `agent-hub-board search '{"kind":"context","text":"database"}'`.
+
+Start with `board_summary`. Its `activeTask` is the Task your Session is working on; read it, search for related Context notes, and keep its status current. While you work:
+
+- `board_log_progress` (`agent-hub-board log "…"`) adds a line to the Task's timeline on the person's canvas. Log meaningful steps, not every action.
+- `board_ask` (`agent-hub-board ask "…"`) puts a question on the Task's card when you need a decision. End your turn after asking; the answer is typed into your terminal.
+- `board_create_note` splits work into subtasks (`parentId`) or records a note; `board_link_notes` relates notes; `board_attach_image` adds a screenshot.
+
+`board_update_task` and `board_complete_task` take the `expectedRevision` from a fresh read; read again if another writer changed a note.
+
+On completion, record the outcome and checked acceptance criteria with `board_complete_task` (`agent-hub-board complete-task`), capturing one concise, evidence-backed codebase fact in a Context note. Give a no-learning reason only when nothing durable was learned. Without the board tools, read these Markdown files directly and leave edits to an Agent Hub terminal.
 
 Old `.agents-hub/tickets/*.json` files are preserved as migration sources. Edit the new note files for current Tasks.

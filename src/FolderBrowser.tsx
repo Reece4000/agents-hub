@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { ChevronRight, Folder, FolderOpen, Loader2, Plus, RefreshCw, Search, X } from 'lucide-react'
 import { bridge } from './bridge'
-import type { RepoContext } from './types'
+/** A folder that belongs to a project, marked in the tree. */
+export interface MarkedFolder { path: string; color: string; running: boolean }
 
 interface DirEntry { name: string; path: string }
 interface DirListing { path: string; home: string; entries: DirEntry[] }
@@ -10,15 +11,13 @@ interface NodeState { entries?: DirEntry[]; error?: string; loading?: boolean }
 const under = (path: string, root: string) => path === root || path.startsWith(root === '/' ? '/' : `${root}/`)
 const baseOf = (path: string) => (path === '/' ? '/' : path.slice(path.lastIndexOf('/') + 1))
 
-/** Filesystem browser. The tree roots at home (plus any context
- *  folder outside it); a dot marks folders holding contexts, green while any
- *  terminal in those contexts runs. */
-export default function FolderBrowser({ selected, contexts, disabled, onSelect, onNewContext, onError }: {
+/** Filesystem browser. The tree roots at home (plus any project folder
+ *  outside it); a dot in the project's colour marks project folders, and
+ *  breathes while any of that project's terminals runs. */
+export default function FolderBrowser({ selected, marked, onSelect, onError }: {
   selected: string
-  contexts: RepoContext[]
-  disabled?: boolean
+  marked: MarkedFolder[]
   onSelect: (path: string) => void
-  onNewContext: (path: string) => void
   onError: (message: string) => void
 }) {
   const [home, setHome] = useState<string | null>(null)
@@ -27,16 +26,7 @@ export default function FolderBrowser({ selected, contexts, disabled, onSelect, 
   const [search, setSearch] = useState('')
   const [refreshing, setRefreshing] = useState(false)
   const autoExpanded = useRef<Set<string>>(new Set())
-  const dots = useMemo(() => {
-    const map = new Map<string, { count: number; running: boolean }>()
-    for (const c of contexts) {
-      const info = map.get(c.repo) ?? { count: 0, running: false }
-      info.count++
-      info.running = info.running || c.terminals.some(terminal => !!terminal.terminalRunning)
-      map.set(c.repo, info)
-    }
-    return map
-  }, [contexts])
+  const dots = useMemo(() => new Map(marked.map(item => [item.path, item])), [marked])
   // Extra roots for context folders outside home, minimized so none nests
   // under another. The selected folder is always reachable this way.
   const roots = useMemo(() => {
@@ -160,7 +150,7 @@ export default function FolderBrowser({ selected, contexts, disabled, onSelect, 
     const isOpen = !!expanded[path]
     const info = dots.get(path)
     const knownEmpty = node?.entries !== undefined && node.entries.length === 0 && !node.error
-    const dotTitle = info ? `${info.count} Session${info.count === 1 ? '' : 's'}${info.running ? ' · running' : ''}` : undefined
+    const dotTitle = info ? `In a project${info.running ? ' · running' : ''}` : ''
     return (
       <div key={path}>
         <div
@@ -181,7 +171,7 @@ export default function FolderBrowser({ selected, contexts, disabled, onSelect, 
           )}
           {isOpen ? <FolderOpen size={15} /> : <Folder size={15} />}
           <span className="folder-name">{name}</span>
-          {info && <span className={`context-dot${info.running ? ' running' : ''}`} title={dotTitle} />}
+          {info && <span className={`context-dot${info.running ? ' running' : ''}`} title={dotTitle} style={{ background: info.color }} />}
         </div>
         {isOpen && node?.entries?.map(e => renderNode(e.path, e.name, depth + 1))}
         {isOpen && node?.error && !node.loading && (
@@ -195,11 +185,6 @@ export default function FolderBrowser({ selected, contexts, disabled, onSelect, 
 
   return (
     <>
-      <button className="new-session" disabled={disabled || !selected} onClick={() => onNewContext(selected)}>
-        <Plus size={17} />
-        <span>New Session</span>
-        <kbd>⌘ N</kbd>
-      </button>
       <label className="search">
         <Search size={14} />
         <input aria-label="Search folders" placeholder="Search folders" value={search} onChange={e => setSearch(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && results[0]) pickResult(results[0].path) }} />
@@ -211,7 +196,7 @@ export default function FolderBrowser({ selected, contexts, disabled, onSelect, 
             <button key={r.path} className={`folder-row result${r.path === selected ? ' active' : ''}`} onClick={() => pickResult(r.path)} title={r.path}>
               <Folder size={15} />
               <span className="folder-name">{baseOf(r.path)}</span>
-              {(() => { const info = dots.get(r.path); return info ? <span className={`context-dot${info.running ? ' running' : ''}`} /> : null })()}
+              {(() => { const info = dots.get(r.path); return info ? <span className={`context-dot${info.running ? ' running' : ''}`} style={{ background: info.color }} /> : null })()}
               <small>{r.path.slice(0, r.path.length - baseOf(r.path).length - 1) || '/'}</small>
             </button>
           )) : <p className="sidebar-empty">No matching folders.</p>

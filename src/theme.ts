@@ -1,5 +1,5 @@
 // Shared theming: two custom colours (background + accent) theme Agent Hub
-// chrome and the hosted Muse TUI together. Pure functions only, so the
+// chrome and the hosted agent terminals together. Pure functions only, so the
 // Electron main process, the renderer, and node tests share this module.
 
 export type ThemeMode = 'dark' | 'light'
@@ -185,7 +185,7 @@ export interface TuiTheme {
   selectionForeground: string
 }
 
-/** xterm.js theme for the hosted TUI. The Muse TUI draws its own syntax
+/** xterm.js theme for hosted terminals. Agent TUIs draw their own syntax
  *  colours over these grounds, so the theme sets background, readable
  *  foreground, and accent-driven cursor/selection — never the ANSI palette. */
 export function buildXtermTheme({ background, accent }: CustomTheme): TuiTheme {
@@ -207,7 +207,7 @@ export function buildXtermTheme({ background, accent }: CustomTheme): TuiTheme {
 }
 
 /** Custom colours forwarded into every spawned PTY environment, so the TUI
- *  process itself (and any future Muse theme support) sees the same theme. */
+ *  process itself sees the same theme. */
 export function themeEnvironment(background?: string, accent?: string): Record<string, string> {
   const env: Record<string, string> = {}
   const customBackground = normalizeThemeColor(background)

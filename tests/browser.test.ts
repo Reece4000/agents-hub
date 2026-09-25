@@ -1,15 +1,12 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { EventEmitter } from 'node:events'
 import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir, homedir } from 'node:os'
 import { join } from 'node:path'
-import { MuseService } from '../server/service'
-import type { MspClient } from '../server/msp'
+import { HubService } from '../server/service'
 
 function serviceIn(dir: string) {
-  const host = Object.assign(new EventEmitter(), { stop() {} }) as MspClient
-  return new MuseService(dir, dir, host)
+  return new HubService(dir, dir)
 }
 
 test('listDir returns directories only, sorted, including hidden ones', async () => {
@@ -53,7 +50,7 @@ test('selecting a folder records nothing; creating a context makes it known', as
     await service.invoke('selectRepo', { repo: tmpdir() })
     assert.deepEqual(service.store.state.repos, before)
     assert.equal(service.store.state.selectedRepo, tmpdir())
-    await service.invoke('newContext', { repo: tmpdir(), name: 'probe', launch: {} })
+    await service.invoke('newContext', { repo: tmpdir(), name: 'probe' })
     assert.ok(service.store.state.repos.includes(tmpdir()))
   } finally { service.close(); rmSync(dir, { recursive: true, force: true }) }
 })

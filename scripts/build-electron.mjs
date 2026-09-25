@@ -6,6 +6,7 @@ import { execFileSync } from 'node:child_process'
 await build({ entryPoints: ['electron/main.ts'], outfile: 'dist-electron/main.cjs', bundle: true, platform: 'node', format: 'cjs', external: ['electron', 'node-pty'], sourcemap: true })
 await build({ entryPoints: ['electron/preload.ts'], outfile: 'dist-electron/preload.cjs', bundle: true, platform: 'node', format: 'cjs', external: ['electron'] })
 await build({ entryPoints: ['server/board-cli.ts'], outfile: 'dist-electron/board-cli.cjs', bundle: true, platform: 'node', format: 'cjs' })
+await build({ entryPoints: ['server/supervisor-main.ts'], outfile: 'dist-electron/supervisor.cjs', bundle: true, platform: 'node', format: 'cjs', external: ['node-pty'] })
 if (process.platform === 'darwin') {
   const cache = join(process.cwd(), '.agent-hub', 'swift-cache')
   mkdirSync(cache, { recursive: true })

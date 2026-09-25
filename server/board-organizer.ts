@@ -7,6 +7,7 @@ import { BoardStore } from './board-store'
 import { resolveExecutable } from './provider-profiles'
 import type { BoardNote, BoardPosition, BoardSection, BoardSnapshot, NoteKind } from '../shared/board'
 import { preferredOrganizerModel, type OrganizerConfig, type OrganizerProvider } from '../shared/organizer-models'
+import { agentEnvironment } from './provider-profiles'
 
 interface ProposedNote { id: string; title?: string; body?: string; kind?: NoteKind; group?: string; links?: string[] }
 interface Proposal { notes: ProposedNote[]; order?: string[] }
@@ -29,7 +30,7 @@ async function runCli(config: OrganizerConfig, prompt: string): Promise<string> 
     : ['-p', '--model', config.model, '--tools', '', '--disallowedTools', 'mcp__*', '--output-format', 'text', 'Return only the requested JSON. Input follows on stdin.']
   try {
     const stdout = await new Promise<string>((resolve, reject) => {
-      const child = spawn(executable, args, { cwd: directory, stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, AGENT_HUB_REPO: '', AGENT_HUB_ACTIVE_TASK_ID: '' } })
+      const child = spawn(executable, args, { cwd: directory, stdio: ['pipe', 'pipe', 'pipe'], env: agentEnvironment() })
       let out = '', error = ''
       const timer = setTimeout(() => { child.kill('SIGTERM'); reject(new Error('Canvas organization timed out.')) }, 120_000)
       child.stdout.on('data', chunk => { out += String(chunk); if (out.length > 2_000_000) { child.kill(); reject(new Error('Organizer output was too large.')) } })

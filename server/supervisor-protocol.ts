@@ -1,5 +1,5 @@
-/** Phase 1 supervisor protocol v1 (docs/PHASE-1-DESIGN.md §4). JSON frames,
- *  newline-delimited over the Unix socket. Every frame carries `v`; the
+/** Supervisor protocol v1: JSON frames, newline-delimited over the Unix
+ *  socket between the app and the process that owns agent terminals. Every frame carries `v`; the
  *  client offers versions in `hello` and the server answers the highest it
  *  supports or errors `incompatible-version`. No silent downgrade, ever. */
 
@@ -13,6 +13,7 @@ export const SUPERVISOR_METHODS = [
   'resize',
   'stop',
   'list',
+  'screen',
   'shutdown',
 ] as const
 export type SupervisorMethod = (typeof SUPERVISOR_METHODS)[number]
@@ -43,6 +44,7 @@ export type SupervisorResponse =
 export type SupervisorEvent =
   | { v: 1; event: 'data'; resourceId: string; generation: number; data: string; seq: number }
   | { v: 1; event: 'exit'; resourceId: string; generation: number; exitCode: number }
+  | { v: 1; event: 'attention'; resourceId: string; generation: number; message: string }
 
 /** Reattach snapshot: today's `Terminals.open` return plus generation. A
  *  client behind the output ring gets a fresh snapshot with resync set. */
@@ -110,6 +112,7 @@ function parseEvent(value: Record<string, unknown>): SupervisorEvent {
     if (typeof value.exitCode !== 'number' || !Number.isInteger(value.exitCode)) throw coded('bad-params', 'Exit events carry an integer exitCode.')
     return { v: 1, event: 'exit', resourceId: value.resourceId, generation: value.generation, exitCode: value.exitCode }
   }
+  if (value.event === 'attention') return { v: 1, event: 'attention', resourceId: value.resourceId, generation: value.generation, message: typeof value.message === 'string' ? value.message : '' }
   throw coded('bad-params', `Unknown event: ${String(value.event)}.`)
 }
 

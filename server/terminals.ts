@@ -4,29 +4,51 @@ import headless from '@xterm/headless'
 import type { Terminal as HeadlessTerminal } from '@xterm/headless'
 const { Terminal } = headless
 import { SerializeAddon } from '@xterm/addon-serialize'
-import { museEnvironment, museExecutable } from './msp'
-import { normalizeLaunch, shellExecutable, terminalArguments, globalArguments } from './launch'
+import { agentEnvironment, shellExecutable } from './provider-profiles'
 import type { TerminalKind, TerminalProfile } from '../src/types'
 
+type Snapshot = { data: string; seq: number; cols: number; rows: number; running: boolean }
+/** Where agent terminals live: in this process (`Terminals`) or in the
+ *  supervisor process (`SupervisorClient`), which outlives the app. Both
+ *  emit data, exit, attention, and input events. */
+export interface TerminalHost extends EventEmitter {
+  running(id: string): boolean
+  runningIds(): string[]
+  open(id: string, cwd: string, spec: OpenSpec): Promise<Snapshot>
+  write(id: string, data: string): void
+  resize(id: string, cols: number, rows: number): void
+  stop(id: string): Promise<void>
+  screenText(id: string): string
+  /** The current screen text of a running terminal. */
+  peek(id: string): Promise<string>
+  close(): void
+}
+export interface OpenSpec { kind: TerminalKind; profile?: TerminalProfile; env?: Record<string, string>; cols?: number; rows?: number }
 type Running = { pty: IPty; screen: HeadlessTerminal; serializer: SerializeAddon; seq: number; alive: boolean; exited: Promise<void>; resolveExit: () => void }
-export class Terminals extends EventEmitter {
-  constructor(private launch?: { executable: string; args: string[] }) { super() }
+export class Terminals extends EventEmitter implements TerminalHost {
   private entries = new Map<string, Running>()
   running(id: string) { return this.entries.get(id)?.alive ?? false }
-  async open(id: string, sessionId: string | null, repo: string, cols = 90, rows = 28, launch?: unknown, kind: TerminalKind = 'muse', extraEnv: Record<string, string> = {}, profile?: TerminalProfile) {
+  /** Ids of terminals whose process is still alive. */
+  runningIds() { return [...this.entries].filter(([, entry]) => entry.alive).map(([id]) => id) }
+  /** Attach to a terminal, spawning it first when it is not running. Shells
+   *  run as a login shell; every other kind runs its profile's executable and
+   *  argv directly, with no shell interpolation. */
+  async open(id: string, repo: string, { kind, profile, env: extraEnv = {}, cols = 90, rows = 28 }: OpenSpec) {
     let entry = this.entries.get(id)
     if (!entry?.alive) {
       entry?.screen.dispose()
+      if (kind !== 'shell' && (!profile?.executable || !Array.isArray(profile.args))) throw new Error('Choose a command for this agent terminal.')
       const screen = new Terminal({ cols, rows, scrollback: 3000, allowProposedApi: true })
       const serializer = new SerializeAddon(); screen.loadAddon(serializer as any)
-      const env = Object.fromEntries(Object.entries(museEnvironment()).filter(([, v]) => typeof v === 'string')) as Record<string,string>
+      // Agents ask for attention with a bell or a desktop-notification escape
+      // (OSC 9 `message`, OSC 777 `notify;title;body`).
+      screen.onBell(() => this.emit('attention', { id, message: '' }))
+      screen.parser.registerOscHandler(9, data => { if (!/^\d+;/.test(data)) this.emit('attention', { id, message: data }); return true })
+      screen.parser.registerOscHandler(777, data => { const [kind, title = '', body = ''] = data.split(';'); if (kind === 'notify') this.emit('attention', { id, message: body || title }); return true })
+      const env = Object.fromEntries(Object.entries(agentEnvironment()).filter(([, v]) => typeof v === 'string')) as Record<string,string>
       for (const [key, value] of Object.entries(extraEnv)) if (typeof value === 'string' && value) env[key] = value
-      if (kind !== 'muse' && kind !== 'shell' && (!profile?.executable || !Array.isArray(profile.args))) throw new Error('Choose a command for this agent terminal.')
-      const executable = kind === 'shell' ? shellExecutable() : kind !== 'muse' ? profile!.executable : this.launch?.executable || museExecutable()
-      // A null session id means a fresh terminal: bare `muse` with the launch
-      // flags, so the TUI creates and owns its session. Only a known Muse id
-      // takes the `resume` path.
-      const args = kind === 'shell' ? ['-l'] : kind !== 'muse' ? profile!.args : this.launch?.args || (sessionId == null ? globalArguments(normalizeLaunch(launch), repo) : terminalArguments(sessionId, repo, normalizeLaunch(launch)))
+      const executable = kind === 'shell' ? shellExecutable() : profile!.executable
+      const args = kind === 'shell' ? ['-l'] : profile!.args
       const pty = spawn(executable, args, { name:'xterm-256color', cols, rows, cwd:repo, env:{...env, TERM:'xterm-256color',COLORTERM:'truecolor'} })
       let resolveExit!: () => void
       entry = { pty, screen, serializer, seq:0, alive:true, exited: new Promise<void>(r => { resolveExit = r }), resolveExit }
@@ -39,14 +61,23 @@ export class Terminals extends EventEmitter {
     await new Promise<void>(resolve => entry!.screen.write('', resolve))
     return { data: entry.serializer.serialize(), seq:entry.seq, cols:entry.screen.cols,rows:entry.screen.rows,running:entry.alive }
   }
-  write(id:string,data:string) { const e=this.entries.get(id); if(e?.alive && typeof data==='string' && data.length<=1_000_000) e.pty.write(data) }
+  write(id:string,data:string) { const e=this.entries.get(id); if(e?.alive && typeof data==='string' && data.length<=1_000_000) { e.pty.write(data); this.emit('input', { id, data }) } }
   /** Latest screen text for an entry, including ones already exited. Used to
-   *  recognize a failed `muse resume` (e.g. a session lease held elsewhere)
-   *  after the PTY has died; empty when there is nothing to read. */
+   *  explain an agent that exited before the terminal attached; empty when
+   *  there is nothing to read. */
   screenText(id:string) {
     const e=this.entries.get(id)
     if(!e) return ''
     try { return e.serializer.serialize().slice(-8000) } catch { return '' }
+  }
+  /** The visible screen as plain text lines, after queued output lands. */
+  async peek(id:string) {
+    const e=this.entries.get(id)
+    if(!e) return ''
+    await new Promise<void>(resolve => e.screen.write('', resolve))
+    const buffer=e.screen.buffer.active, lines: string[]=[]
+    for(let row=buffer.viewportY; row<buffer.viewportY+e.screen.rows; row++) lines.push(buffer.getLine(row)?.translateToString(true) ?? '')
+    return lines.join('\n')
   }
   resize(id:string,cols:number,rows:number) { const e=this.entries.get(id); if(!e?.alive || !Number.isInteger(cols)||!Number.isInteger(rows))return; cols=Math.max(20,Math.min(400,cols));rows=Math.max(5,Math.min(200,rows));if(e.screen.cols===cols&&e.screen.rows===rows)return;e.screen.resize(cols,rows);e.pty.resize(cols,rows) }
   async stop(id:string) {

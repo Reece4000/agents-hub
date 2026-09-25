@@ -10,7 +10,7 @@ import {
 
 test('protocol version is pinned and methods are closed', () => {
   assert.equal(SUPERVISOR_PROTOCOL_VERSION, 1)
-  assert.deepEqual([...SUPERVISOR_METHODS], ['hello', 'open', 'attach', 'input', 'resize', 'stop', 'list', 'shutdown'])
+  assert.deepEqual([...SUPERVISOR_METHODS], ['hello', 'open', 'attach', 'input', 'resize', 'stop', 'list', 'screen', 'shutdown'])
 })
 
 test('valid request, response, and event frames parse', () => {

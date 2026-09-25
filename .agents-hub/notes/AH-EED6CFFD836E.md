@@ -5,9 +5,9 @@
   "kind": "task",
   "title": "allow for image upload to tasks or notes, allow those to be referenced by the model in tasks",
   "createdAt": "2026-09-24T08:54:14.623Z",
-  "updatedAt": "2026-09-24T11:29:04.866Z",
-  "updatedBy": "Codex",
-  "sectionId": "",
+  "updatedAt": "2026-09-24T20:06:42.699Z",
+  "updatedBy": "person",
+  "sectionId": "SC-66ED22F705D7",
   "links": [
     {
       "to": "AH-6C6F99560D4C",

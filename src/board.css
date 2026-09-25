@@ -118,7 +118,7 @@
 .kb-organizer-wrap{position:relative;flex:none}
 .kb-organizer-trigger{display:flex;align-items:center;gap:6px;padding:7px 10px;border:1px solid var(--border);border-radius:7px;background:var(--surface);color:var(--text);font-size:12px;cursor:pointer}
 .kb-organizer-trigger.active{border-color:var(--accent);color:var(--accent)}
-.kb-organizer-panel{position:absolute;z-index:45;right:0;top:calc(100% + 8px);width:min(430px,calc(100vw - 32px));max-height:min(72vh,680px);overflow:auto;padding:16px;border:1px solid var(--border);border-radius:12px;background:var(--surface);box-shadow:0 18px 55px #0005;color:var(--text)}
+.kb-organizer-panel{position:absolute;z-index:45;left:0;top:calc(100% + 8px);width:min(430px,calc(100vw - 32px));max-height:min(72vh,680px);overflow:auto;padding:16px;border:1px solid var(--border);border-radius:12px;background:var(--surface);box-shadow:0 18px 55px #0005;color:var(--text)}
 .kb-organizer-panel header,.kb-organizer-last>div:first-child{display:flex;align-items:center;justify-content:space-between;gap:12px}
 .kb-organizer-panel header{margin-bottom:14px}.kb-organizer-panel header div{display:flex;flex-direction:column;gap:3px}.kb-organizer-panel header span,.kb-organizer-explain,.kb-organizer-last span{font-size:11px;color:var(--muted)}
 .kb-organizer-panel header button{border:0;background:transparent;color:inherit;cursor:pointer}.kb-organizer-panel label:not(.kb-organizer-toggle){display:flex;flex-direction:column;gap:5px;margin:10px 0;font-size:11px;font-weight:600}
@@ -130,3 +130,125 @@
 .kb-organizer-last{border-top:1px solid var(--border);padding-top:12px}.kb-organizer-last>div:first-child strong{font-size:11px}.kb-organizer-last details{margin-top:10px;font-size:11px}.kb-organizer-last summary{cursor:pointer;color:var(--accent)}.kb-organizer-last article{margin-top:12px}.kb-organizer-diff{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:6px}.kb-organizer-diff>div{min-width:0}.kb-organizer-diff small{font-size:10px;text-transform:uppercase;color:var(--muted)}.kb-organizer-diff pre{max-height:180px;overflow:auto;white-space:pre-wrap;word-break:break-word;padding:8px;border:1px solid var(--border);border-radius:5px;background:var(--canvas);font:11px/1.4 inherit}
 .knowledge-board{container-type:inline-size}
 @media(max-width:780px){.kb-toolbar{height:auto;min-height:76px;flex-basis:auto;flex-direction:column;align-items:stretch;justify-content:center;padding:6px 8px;gap:5px}.kb-tools{width:100%;gap:5px}.kb-search-wrap{width:auto;min-width:65px;flex:1}.kb-organizer-trigger{padding:7px;font-size:11px}.kb-organizer-panel{left:0;right:auto;width:min(430px,calc(100cqw - 16px))}.kb-filter-trigger{padding-inline:5px}}
+
+/* Agents on the canvas: live status, questions, and progress. */
+.kb-card-question,.kb-card-live,.kb-card-log{display:flex;align-items:center;gap:6px;margin:0 12px 6px;padding:5px 8px;border-radius:6px;font-size:10px;line-height:1.3;min-width:0}
+.kb-card-question span,.kb-card-live span,.kb-card-log span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;flex:1}
+.kb-card-question{background:var(--warning-bg);color:var(--warning);font-weight:550}
+.kb-card-question svg{flex-shrink:0}
+.kb-card-live{background:var(--accent-soft);color:var(--secondary)}
+.kb-card-live strong{color:var(--text);font-weight:600}
+.kb-card-live i{width:6px;height:6px;border-radius:50%;background:var(--accent);flex-shrink:0}
+.kb-card-live.state-working i{animation:breathe 1.8s ease-in-out infinite}
+.kb-card-live.state-waiting{background:var(--warning-bg);color:var(--warning)}
+.kb-card-live.state-waiting i{background:var(--warning);animation:breathe 1s ease-in-out infinite}
+.kb-card-live.state-idle i,.kb-card-live.state-starting i{opacity:.5}
+.kb-card-log{color:var(--muted);padding-left:4px}
+.kb-card-log svg{flex-shrink:0;opacity:.7}
+.kb-card-log time{flex-shrink:0;opacity:.8}
+.kb-card.asking{border-color:var(--warning);box-shadow:0 0 0 1px var(--warning),0 10px 26px rgba(0,0,0,.18)}
+.kb-card.live-working{border-color:color-mix(in srgb,var(--accent) 55%,var(--border))}
+.kb-card.live-waiting{border-color:var(--warning)}
+.kb-question{margin:0 0 14px;padding:12px;border:1px solid var(--warning);border-radius:9px;background:var(--warning-bg);display:flex;flex-direction:column;gap:8px}
+.kb-question-head{display:flex;align-items:center;gap:7px;color:var(--warning);font-size:11px}
+.kb-question-head strong{font-weight:650}
+.kb-question p{margin:0;font-size:13px;line-height:1.5;color:var(--text);white-space:pre-wrap}
+.kb-question-options{display:flex;flex-wrap:wrap;gap:6px}
+.kb-question-options button{padding:5px 10px;border-radius:999px;border:1px solid var(--border);background:var(--surface);color:var(--text);font-size:11px}
+.kb-question-options button:hover{border-color:var(--warning)}
+.kb-question textarea{width:100%;resize:vertical;min-height:52px;font:inherit;font-size:12px;padding:7px 9px;border-radius:6px;border:1px solid var(--border);background:var(--surface);color:var(--text)}
+.kb-question-actions{display:flex;align-items:center;gap:8px;justify-content:space-between}
+.kb-question-actions small{color:var(--muted);font-size:10px}
+.kb-progress{margin:12px 0;display:flex;flex-direction:column;gap:6px}
+.kb-progress>div{display:flex;justify-content:space-between;align-items:center;color:var(--muted);font-size:10px}
+.kb-progress ol{list-style:none;margin:0;padding:0 0 0 10px;border-left:1px solid var(--border);display:flex;flex-direction:column;gap:7px}
+.kb-progress li{display:grid;grid-template-columns:32px auto 1fr;gap:6px;font-size:11px;line-height:1.4;position:relative}
+.kb-progress li::before{content:'';position:absolute;left:-14px;top:5px;width:7px;height:7px;border-radius:50%;background:var(--surface);border:1px solid var(--accent)}
+.kb-progress li:first-child::before{background:var(--accent)}
+.kb-progress time{color:var(--muted)}
+.kb-progress strong{font-weight:600;color:var(--secondary);white-space:nowrap}
+.kb-progress span{color:var(--text);min-width:0;overflow-wrap:anywhere}
+.kb-progress>button{align-self:flex-start;font-size:10px;color:var(--accent);background:none;border:0;padding:0}
+
+/* Agent pucks: drag one onto a task to hand it over. */
+.kb-agents{position:absolute;left:14px;bottom:44px;display:flex;gap:10px;align-items:flex-end;z-index:30;padding:8px 10px;border-radius:14px;background:color-mix(in srgb,var(--surface) 88%,transparent);border:1px solid var(--border);box-shadow:0 8px 24px rgba(0,0,0,.18);backdrop-filter:blur(6px);max-width:calc(100% - 200px);overflow-x:auto}
+.kb-puck{display:flex;flex-direction:column;align-items:center;gap:4px;background:none;border:0;padding:0;cursor:grab;color:var(--secondary);min-width:44px}
+.kb-puck:active{cursor:grabbing}
+.kb-puck-face{position:relative;width:34px;height:34px;border-radius:50%;display:grid;place-items:center;font-size:11px;font-weight:700;letter-spacing:.02em;color:var(--text);background:var(--button);box-shadow:0 0 0 2px var(--border);transition:transform .15s ease,box-shadow .2s ease}
+.kb-puck:hover .kb-puck-face{transform:translateY(-2px) scale(1.05)}
+.kb-puck-name{font-size:9px;max-width:64px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.kb-puck.state-working .kb-puck-face{background:var(--accent-soft);box-shadow:0 0 0 2px var(--accent);animation:puck-pulse 1.8s ease-in-out infinite}
+.kb-puck.state-waiting .kb-puck-face{background:var(--warning-bg);box-shadow:0 0 0 2px var(--warning);animation:puck-pulse 1s ease-in-out infinite;color:var(--warning)}
+.kb-puck.state-idle .kb-puck-face,.kb-puck.state-starting .kb-puck-face{box-shadow:0 0 0 2px color-mix(in srgb,var(--accent) 45%,var(--border))}
+.kb-puck.state-stopped .kb-puck-face{opacity:.55;box-shadow:none;outline:1px dashed var(--muted);outline-offset:1px}
+.kb-puck-new{cursor:pointer}
+.kb-puck-new .kb-puck-face{background:transparent;box-shadow:none;outline:1px dashed var(--muted);color:var(--muted)}
+@keyframes puck-pulse{0%,100%{filter:brightness(1)}50%{filter:brightness(1.25)}}
+.kb-card.drop-ready{outline:1px dashed color-mix(in srgb,var(--accent) 60%,transparent);outline-offset:3px}
+.kb-card.drop-target{outline:2px solid var(--accent);outline-offset:3px;transform:scale(1.03);box-shadow:0 14px 34px rgba(0,0,0,.28)}
+button.kb-card-live{border:0;cursor:pointer;text-align:left;font:inherit;font-size:10px;width:calc(100% - 24px)}
+button.kb-card-live:hover{filter:brightness(1.12)}
+.kb-hand{position:relative}
+.kb-hand-menu{position:absolute;bottom:calc(100% + 6px);left:0;min-width:240px;max-width:320px;display:flex;flex-direction:column;padding:4px;border-radius:9px;background:var(--surface);border:1px solid var(--border);box-shadow:0 12px 30px rgba(0,0,0,.28);z-index:20}
+.kb-hand-menu button{display:grid;grid-template-columns:10px auto 1fr;align-items:center;gap:8px;padding:7px 8px;border-radius:6px;border:0;background:none;color:var(--text);text-align:left;font-size:11px}
+.kb-hand-menu button:hover{background:var(--hover)}
+.kb-hand-menu small{color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.kb-hand-menu .kb-hand-new{grid-template-columns:auto 1fr;color:var(--accent)}
+
+/* New cards pop in; cards an agent just changed glow briefly. */
+.kb-card.is-new{animation:card-in .32s cubic-bezier(.2,.9,.3,1.25)}
+.kb-card.agent-touched{animation:card-touched 1.6s ease-out}
+@keyframes card-in{from{opacity:0;transform:scale(.86) translateY(8px)}to{opacity:1;transform:none}}
+@keyframes card-touched{0%{box-shadow:0 0 0 2px var(--accent),0 0 24px color-mix(in srgb,var(--accent) 45%,transparent)}100%{box-shadow:0 0 0 0 transparent}}
+
+/* Context facts whose evidence changed after they were verified. */
+.kb-card.is-stale{opacity:.78;border-style:dashed}
+.kb-card.is-stale:hover{opacity:1}
+.kb-card-stale{display:flex;align-items:center;gap:6px;margin:0 12px 6px;padding:5px 8px;border-radius:6px;font-size:10px;background:var(--warning-bg);color:var(--warning);min-width:0}
+.kb-card-stale span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.kb-card-stale svg{flex-shrink:0}
+.kb-stale{margin:0 0 14px;padding:12px;border:1px dashed var(--warning);border-radius:9px;background:var(--warning-bg);display:flex;flex-direction:column;gap:8px}
+.kb-stale-head{display:flex;align-items:center;gap:7px;color:var(--warning);font-size:12px}
+.kb-stale-head span{margin-left:auto;font-size:10px;color:var(--muted)}
+.kb-stale ul{margin:0;padding-left:18px;font-size:11px;color:var(--text);display:flex;flex-direction:column;gap:3px}
+.kb-stale-actions{display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap}
+.kb-stale-actions button:not(.kb-work){padding:6px 10px;border-radius:7px;border:1px solid var(--border);background:var(--surface);color:var(--text);font-size:11px}
+
+/* Multi-selection and context packs. */
+.kb-card.picked{outline:2px solid var(--accent);outline-offset:3px}
+.kb-lasso{position:absolute;z-index:40;border:1px solid var(--accent);background:color-mix(in srgb,var(--accent) 12%,transparent);border-radius:4px;pointer-events:none}
+.kb-selection{position:absolute;top:12px;left:50%;transform:translateX(-50%);z-index:35;display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:11px;background:var(--surface);border:1px solid var(--accent);box-shadow:0 12px 30px rgba(0,0,0,.28);animation:palette-in .14s ease-out}
+.kb-selection>button:not(.kb-work){display:flex;align-items:center;gap:5px;padding:6px 9px;border-radius:7px;border:1px solid var(--border);background:var(--button);color:var(--text);font-size:11px}
+.kb-selection .kb-selection-clear{padding:5px;border:0;background:none;color:var(--muted)}
+.kb-pack-handle{display:flex;align-items:center;gap:7px;padding:4px 8px;border-radius:7px;cursor:grab;color:var(--text);font-size:11px;background:var(--accent-soft)}
+.kb-pack-handle small{color:var(--muted)}
+.kb-hand-menu-down{bottom:auto;top:calc(100% + 6px)}
+.kb-puck.pack-ready .kb-puck-face{outline:2px dashed var(--accent);outline-offset:3px}
+.kb-puck.pack-target .kb-puck-face{transform:scale(1.18);box-shadow:0 0 0 3px var(--accent)}
+.kb-card-open,.kb-card-top{user-select:none;-webkit-user-select:none}
+.kb-selection button,.kb-selection .kb-pack-handle{white-space:nowrap}
+.kb-selection{max-width:calc(100% - 24px)}
+
+/* Fan-out: subtasks, worktrees, and branch chips. */
+.kb-card-branch{display:flex;align-items:center;gap:5px;margin:0 12px 4px;font-size:9.5px;color:var(--secondary);min-width:0}
+.kb-card-branch span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.kb-card-branch small{margin-left:auto;flex-shrink:0;color:var(--muted)}
+.plus{color:var(--accent);font-weight:600}.minus{color:var(--error);font-weight:600}
+.kb-subtasks,.kb-worktree{margin:12px 0;display:flex;flex-direction:column;gap:6px}
+.kb-subtasks>div:first-child{display:flex;justify-content:space-between;color:var(--muted);font-size:10px}
+.kb-subtask{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:7px;border:1px solid var(--border);background:var(--surface);color:var(--text);font-size:11px;text-align:left;min-width:0}
+.kb-subtask span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.kb-subtask small{display:flex;align-items:center;gap:3px;color:var(--muted);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:9.5px}
+.kb-subtask-actions{display:flex;gap:8px;align-items:center}
+.kb-subtask-actions select{flex:1;min-width:0;font-size:11px;padding:5px 6px;border-radius:6px;border:1px solid var(--border);background:var(--button);color:var(--text)}
+.kb-worktree{padding:10px;border:1px solid var(--border);border-radius:9px;background:var(--code)}
+.kb-worktree-head{display:flex;align-items:center;gap:7px;font-size:11px;flex-wrap:wrap}
+.kb-worktree-head strong{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:600}
+.kb-worktree-head span{color:var(--muted);margin-left:auto}
+.kb-worktree code{font-size:10px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.kb-worktree-actions{display:flex;gap:6px;flex-wrap:wrap}
+.kb-worktree-actions button{padding:5px 9px;border-radius:6px;border:1px solid var(--border);background:var(--surface);color:var(--text);font-size:11px}
+.kb-worktree-actions button.danger{border-color:var(--error);color:var(--error)}
+.kb-agents{transition:opacity .18s ease,transform .18s ease}
+.kb-agents.receded{opacity:.22;transform:translateY(10px)}
+.kb-agents.receded:hover,.kb-agents.receded:focus-within{opacity:1;transform:none}

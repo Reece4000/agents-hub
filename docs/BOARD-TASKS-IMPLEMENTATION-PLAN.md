@@ -4,7 +4,7 @@ This plan covers the seven Tasks added on 24 September 2026. Six Tasks are marke
 
 ## Brief and current state
 
-**User and job.** A developer wants to capture and organize work directly on the canvas, attach visual evidence, dictate notes, and launch their preferred coding agent without learning a Muse-specific setup.
+**User and job.** A developer wants to capture and organize work directly on the canvas, attach visual evidence, dictate notes, and launch their preferred coding agent without learning a provider-specific setup.
 
 **Desired outcome.** A card is the editing surface. Changes save without a Save button and remain safe across external edits. Images and dictated text become usable task context. Session launch and automatic canvas organization work with several installed agents. The organizer improves text coherence, links, grouping, and placement while treating user-authored messages as the source of truth.
 
@@ -17,7 +17,7 @@ This plan covers the seven Tasks added on 24 September 2026. Six Tasks are marke
 | Slice | Tasks | Why this order | Done when |
 | --- | --- | --- | --- |
 | 1. Card editing | AH-889FBF96E237, AH-A40BD615EEFB, AH-2212EF69454F | Autosave and drag behavior must be settled together before adding more inputs to cards. | Every note field can be edited on an expanded card, saved automatically, and moved by its header. |
-| 2. First-class Sessions | AH-9201DE507D25 | A provider registry gives the organizer a clear execution path and removes Muse-specific launcher assumptions. | Codex, Claude Code, Cursor Agent, Muse, Shell, and custom CLI can be launched with their own valid options and clear missing-install errors. |
+| 2. First-class Sessions | AH-9201DE507D25 | A provider registry gives the organizer a clear execution path and removes single-provider launcher assumptions. | Codex, Claude Code, Cursor Agent, Shell, and custom CLI can be launched with their own valid options and clear missing-install errors. |
 | 3. Image context | AH-EED6CFFD836E | Board assets need a durable repo-local path before briefings or model runs can reference them. | A task or note can show, remove, and reopen uploaded images; a task briefing identifies each image to the agent. |
 | 4. Dictation | AH-BAD925F022D9 | The transcript should enter the same editor and autosave path as typing. | A user can record, review, and insert a transcript into a note, including permission and failure recovery. |
 | 5. Canvas organizer | AH-058D0CA9299A | It consumes the stable note, image, link, layout, and provider contracts from earlier slices. | A configured lightweight model improves text and links and automatically arranges existing cards, with preserved user source, visible changes, and whole-operation undo. |
@@ -38,11 +38,11 @@ Slices 3 and 4 can be built independently after slice 1. Slice 5 can begin as a 
 
 ## 2. Provider-neutral Session launch
 
-Replace the three-way `muse | shell | custom` UI with a typed provider registry. Add first-class Codex, Claude Code, and Cursor Agent profiles while retaining Muse, Shell, and Custom. Keep a migration reader for stored terminals using the current `TerminalKind`; new records should retain the chosen provider identity and provider-specific settings. A common launch contract should resolve an installed executable to an absolute path, validate arguments before creating the terminal, and spawn without a shell. [rule/cover-reachable-states]
+Replace the single-provider launcher with a typed provider registry. Add first-class Codex, Claude Code, and Cursor Agent profiles alongside Shell and Custom. Keep a migration reader for stored terminals using the current `TerminalKind`; new records should retain the chosen provider identity and provider-specific settings. A common launch contract should resolve an installed executable to an absolute path, validate arguments before creating the terminal, and spawn without a shell. [rule/cover-reachable-states]
 
-The modal should first ask for the Session name and agent, then show only that agent's relevant options. Default to the provider's own model and permission settings unless the user changes them. Show installed/unavailable states and a useful repair path. Keep a custom executable plus argv editor for other agents. Avoid applying Muse approval, trust, or model settings to other providers. Preserve a copyable board brief for every CLI and do not imply that MCP registration has happened automatically. [rule/smallest-intervention, rule/one-primary-action, rule/error-states-recovery]
+The modal should first ask for the Session name and agent, then show only that agent's relevant options. Default to the provider's own model and permission settings unless the user changes them. Show installed/unavailable states and a useful repair path. Keep a custom executable plus argv editor for other agents. Avoid applying one provider's approval, trust, or model settings to another. Preserve a copyable board brief for every CLI and do not imply that MCP registration has happened automatically. [rule/smallest-intervention, rule/one-primary-action, rule/error-states-recovery]
 
-**Code seams.** `src/LaunchModal.tsx`, `src/types.ts`, `server/service.ts`, `server/profiles.ts`, `server/terminals.ts`, `server/store.ts`, and browser preview `src/bridge.ts`. The existing custom-profile UI says PATH commands are accepted, while `resolveCustomProfile` requires an absolute path and the service does not call it; unify validation and resolution before adding presets. Keep the existing Muse launch data readable.
+**Code seams.** `src/LaunchModal.tsx`, `src/types.ts`, `server/service.ts`, `server/provider-profiles.ts`, `server/terminals.ts`, `server/store.ts`, and browser preview `src/bridge.ts`. The existing custom-profile UI says PATH commands are accepted, while `resolveCustomProfile` requires an absolute path and the service does not call it; unify validation and resolution before adding presets.
 
 **Checks.** Test profile-to-argv mapping per provider, missing executable, invalid options, persisted Session migration, launch in the selected repo, and board briefing delivery. Verify in a packaged app, where GUI PATH commonly differs from the user's shell. The exact supported flags should be checked against the installed CLI version during implementation: [Codex CLI](https://developers.openai.com/codex/cli/reference), [Claude Code CLI](https://code.claude.com/docs/en/cli-reference), [Cursor Agent CLI](https://docs.cursor.com/en/cli/reference/parameters).
 

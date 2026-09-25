@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from 'react'
-import { ArrowDownRight, BookOpen, Check, ChevronDown, ChevronRight, CircleHelp, Command, CornerDownRight, FileText, Focus, Folder, Grip, History, ImagePlus, Mic, Layers3, Link2, Maximize2, Minus, MoreHorizontal, Plus, Search, Trash2, X } from 'lucide-react'
+import { AlertTriangle, GitBranch, ArrowDownRight, BookOpen, Check, ChevronDown, ChevronRight, CircleHelp, Command, CornerDownRight, FileText, Focus, Folder, Grip, History, ImagePlus, Mic, Layers3, Link2, Maximize2, Minus, MoreHorizontal, Plus, Search, Trash2, X } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { bridge } from './bridge'
 import OrganizerPanel from './OrganizerPanel'
 import { zoomAtCursor } from './viewport'
-import type { RepoContext, Viewport } from './types'
-import type { BoardCommand, BoardNote, BoardPosition, BoardQuery, BoardSection, BoardSnapshot, NoteKind, TaskState } from '../shared/board'
+import type { RepoContext, TerminalResource, Viewport } from './types'
+import { mostUrgent, terminalState, terminalStatus } from './agentState'
+import { contextPack } from './contextPack'
+import type { BoardCommand, BoardNote, BoardPosition, BoardQuery, BoardSection, BoardSnapshot, NoteKind, ProgressEntry, TaskState } from '../shared/board'
 import { cardWidth, cardHeight, withMissingPositions } from '../shared/board-layout'
 import './board.css'
 
@@ -25,11 +27,42 @@ const linkCurve = (from: BoardPosition, to: BoardPosition, point = false) => {
   return `M ${startX} ${startY} C ${startX + direction * reach} ${startY}, ${endX - direction * reach} ${endY}, ${endX} ${endY}`
 }
 
+/** The running agent working on a task: its Session's most urgent terminal. */
+const liveAgent = (note: BoardNote, sessions: RepoContext[]) => {
+  if (note.kind !== 'task' || !note.sessionId || note.status === 'done') return null
+  const session = sessions.find(item => item.id === note.sessionId)
+  const running = session?.terminals.filter(terminal => terminal.terminalRunning && terminal.terminalKind !== 'shell') ?? []
+  if (!running.length) return null
+  const state = mostUrgent(running)
+  const terminal = running.find(item => (item.activity?.state ?? 'idle') === state) ?? running[0]
+  return { state, name: terminal.name, status: terminalStatus(terminal), terminalId: terminal.id }
+}
+/** Drag payload type for handing a task to an agent puck's terminal. */
+const AGENT_DRAG = 'application/x-agent-hub-terminal'
+/** Drag payload type for a selection of notes sent to an agent as context. */
+const PACK_DRAG = 'application/x-agent-hub-pack'
+const initials = (name: string) => { const words = name.trim().split(/\s+/).filter(Boolean); return (words.length > 1 ? words.map(word => word[0]).join('') : name.slice(0, 2)).slice(0, 2).toUpperCase() || '·' }
+const canTake = (note: BoardNote) => note.kind === 'task' && note.status !== 'done'
+/** Whether a context note's evidence changed after it was verified. */
+type Freshness = { stale: boolean; reasons: string[]; verifiedAt: string }
+/** How far a Task's worktree has moved since it was created. */
+type WorktreeStatus = { exists: boolean; commits: number; files: number; insertions: number; deletions: number; dirty: boolean }
+const shortBranch = (branch: string) => branch.replace(/^agent\//, '')
+const ago = (value: string) => {
+  const seconds = Math.max(0, (Date.now() - new Date(value).getTime()) / 1000)
+  return seconds < 60 ? 'now' : seconds < 3600 ? `${Math.floor(seconds / 60)}m` : seconds < 86400 ? `${Math.floor(seconds / 3600)}h` : date(value)
+}
+
 type Menu = { x: number; y: number; world: BoardPosition; target?: string; section?: string }
 type Capture = { kind: NoteKind; position: BoardPosition; x: number; y: number }
-type Drag = { type: 'pan' | 'note' | 'section' | 'resize'; id?: string; startX: number; startY: number; startViewport: Viewport; startPosition?: BoardPosition; startSection?: BoardSection; originalPositions?: Record<string, BoardPosition>; moved: boolean }
+type Drag = { type: 'pan' | 'note' | 'section' | 'resize' | 'lasso'; id?: string; group?: string[]; startX: number; startY: number; startViewport: Viewport; startPosition?: BoardPosition; startSection?: BoardSection; originalPositions?: Record<string, BoardPosition>; moved: boolean }
 
-export default function BoardCanvas({ repo, sessions, isVisible = true, onWork, onError }: { repo: string; sessions: RepoContext[]; isVisible?: boolean; onWork: (sessionId: string, task: BoardNote) => void; onError: (message: string) => void }) {
+export default function BoardCanvas({ repo, sessions, isVisible = true, focusRequest, createRequest, onDispatch, onOpenTerminal, onNewAgent, onError }: { repo: string; sessions: RepoContext[]; isVisible?: boolean; focusRequest?: { id: string; nonce: number } | null; createRequest?: { kind: NoteKind; nonce: number } | null; onDispatch: (taskId: string, terminalId: string) => void; onOpenTerminal: (terminalId: string) => void; onNewAgent: () => void; onError: (message: string) => void }) {
+  const agents = useMemo(() => sessions.flatMap(session => session.terminals.filter(terminal => terminal.terminalKind !== 'shell')), [sessions])
+  const [draggingAgent, setDraggingAgent] = useState<string | null>(null)
+  const [freshness, setFreshness] = useState<Record<string, Freshness>>({})
+  const [worktrees, setWorktrees] = useState<Record<string, WorktreeStatus | null>>({})
+  const [dropTarget, setDropTarget] = useState<string | null>(null)
   const [snapshot, setSnapshot] = useState<BoardSnapshot>(blank)
   const [positions, setPositions] = useState<Record<string, BoardPosition>>({})
   const [sections, setSections] = useState<BoardSection[]>([])
@@ -62,6 +95,27 @@ export default function BoardCanvas({ repo, sessions, isVisible = true, onWork, 
   const initialized = useRef<string | null>(null)
   const positionsRef = useRef(positions), sectionsRef = useRef(sections), viewportRef = useRef(viewport)
   positionsRef.current = positions; sectionsRef.current = sections; viewportRef.current = viewport
+  // Eased camera moves for jumps (search, fit, zoom buttons); direct input
+  // (wheel, drag) cancels a flight in progress.
+  const flight = useRef(0)
+  const flyTo = useCallback((target: Viewport | ((current: Viewport) => Viewport)) => {
+    const start = viewportRef.current
+    const end = typeof target === 'function' ? target(start) : target
+    cancelAnimationFrame(flight.current)
+    if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) { setViewport(end); return }
+    const began = performance.now(), duration = 320
+    const step = (now: number) => {
+      const t = Math.min(1, (now - began) / duration), e = 1 - Math.pow(1 - t, 3)
+      setViewport({ x: start.x + (end.x - start.x) * e, y: start.y + (end.y - start.y) * e, zoom: start.zoom + (end.zoom - start.zoom) * e })
+      if (t < 1) flight.current = requestAnimationFrame(step)
+    }
+    flight.current = requestAnimationFrame(step)
+  }, [])
+  const zoomBy = (delta: number) => flyTo(current => {
+    const zoom = clamp(current.zoom + delta, .35, 1.8), cx = surfaceSize.width / 2, cy = surfaceSize.height / 2
+    return { x: cx - (cx - current.x) * zoom / current.zoom, y: cy - (cy - current.y) * zoom / current.zoom, zoom }
+  })
+  const fitView = () => fit({ ...snapshot, positions: positionsRef.current, sections: sectionsRef.current }, surface.current, flyTo)
   const editorWidth = Math.min(440, Math.max(280, surfaceSize.width - 24))
   const editorHeight = Math.min(600, Math.max(240, surfaceSize.height - 24))
   const visible = useMemo(() => snapshot.notes.filter(note => showDone || note.status !== 'done'), [snapshot.notes, showDone])
@@ -144,9 +198,69 @@ export default function BoardCanvas({ repo, sessions, isVisible = true, onWork, 
     const position = positionsRef.current[note.id] ?? { x: 100, y: 100 }
     const section = sectionsRef.current.find(item => item.id === note.sectionId)
     if (section?.collapsed) { void apply({ type: 'updateSection', id: section.id, patch: { collapsed: false } }) }
-    setViewport(current => ({ ...current, x: (surfaceSize.width - editorWidth) / 2 - position.x * current.zoom, y: (surfaceSize.height - editorHeight) / 2 - position.y * current.zoom }))
+    flyTo(current => ({ ...current, x: (surfaceSize.width - editorWidth) / 2 - position.x * current.zoom, y: (surfaceSize.height - editorHeight) / 2 - position.y * current.zoom }))
     setFocusTitleId(null)
   }
+  // Multi-selection ("picked" cards) for group moves and context packs.
+  const [picked, setPicked] = useState<Set<string>>(() => new Set())
+  const pickedRef = useRef(picked); pickedRef.current = picked
+  const [lasso, setLasso] = useState<{ x: number; y: number; width: number; height: number } | null>(null)
+  const lassoRef = useRef(lasso); lassoRef.current = lasso
+  const [draggingPack, setDraggingPack] = useState(false)
+  const [packTarget, setPackTarget] = useState<string | null>(null)
+  const pickedNotes = useMemo(() => snapshot.notes.filter(note => picked.has(note.id)), [snapshot.notes, picked])
+  const pack = useMemo(() => pickedNotes.length ? contextPack(pickedNotes) : '', [pickedNotes])
+  const [packMenu, setPackMenu] = useState(false)
+  const sendPack = async (terminalId: string) => {
+    setPackMenu(false)
+    const agent = agents.find(item => item.id === terminalId)
+    try {
+      const delivery = await bridge.invoke<'sent' | 'queued'>('terminal:deliver', { id: terminalId, text: pack })
+      onError(`${pickedNotes.length} note${pickedNotes.length === 1 ? '' : 's'} ${delivery === 'queued' ? 'queued for' : 'sent to'} ${agent?.name ?? 'the agent'}.`)
+      onOpenTerminal(terminalId)
+    } catch (error) { onError((error as Error).message) }
+  }
+  const taskFromPicks = async () => {
+    const xs = pickedNotes.map(note => positionsRef.current[note.id]?.x ?? 0), ys = pickedNotes.map(note => positionsRef.current[note.id]?.y ?? 0)
+    const created = await apply({ type: 'createNote', position: { x: Math.max(...xs) + cardWidth + 60, y: Math.round(ys.reduce((a, b) => a + b, 0) / Math.max(1, ys.length)) }, note: {
+      kind: 'task', title: 'New task', links: pickedNotes.map(note => ({ to: note.id, kind: 'relates_to' as const })),
+      body: `Built from:\n${pickedNotes.map(note => `- ${note.id} ${note.title}`).join('\n')}`,
+    } }) as BoardNote | null
+    if (created) { setPicked(new Set()); setFocusTitleId(created.id); void openNote(created.id) }
+  }
+  const togglePick = (id: string) => setPicked(current => { const next = new Set(current); if (next.has(id)) next.delete(id); else next.add(id); return next })
+  // Worktree progress for fanned-out tasks, refreshed while any exist.
+  const hasWorktrees = snapshot.notes.some(note => note.worktree)
+  useEffect(() => {
+    if (!repo || !hasWorktrees || !isVisible) return
+    let live = true
+    const load = () => bridge.invoke<Record<string, WorktreeStatus | null>>('board:worktree:status', { repo }).then(value => { if (live) setWorktrees(value ?? {}) }).catch(() => {})
+    const first = setTimeout(load, 300), timer = setInterval(load, 8000)
+    return () => { live = false; clearTimeout(first); clearInterval(timer) }
+  }, [repo, hasWorktrees, isVisible, snapshot])
+  // Re-check context evidence against git shortly after the board settles.
+  useEffect(() => {
+    if (!repo || loading) return
+    let live = true
+    const timer = setTimeout(() => { bridge.invoke<Record<string, Freshness>>('board:freshness', { repo }).then(value => { if (live) setFreshness(value ?? {}) }).catch(() => {}) }, 800)
+    return () => { live = false; clearTimeout(timer) }
+  }, [repo, loading, snapshot])
+  // The command palette asks for a new note or task at the view's center.
+  const handledCreate = useRef(0)
+  useEffect(() => {
+    if (!createRequest || handledCreate.current === createRequest.nonce || loading) return
+    handledCreate.current = createRequest.nonce
+    void create(createRequest.kind, centerWorld())
+  }, [createRequest, loading])
+  // A notification click (or other caller) asks to bring a note into view.
+  const handledFocus = useRef(0)
+  useEffect(() => {
+    if (!focusRequest || handledFocus.current === focusRequest.nonce) return
+    const target = snapshot.notes.find(note => note.id === focusRequest.id)
+    if (!target) return
+    handledFocus.current = focusRequest.nonce
+    void focusNote(target)
+  }, [focusRequest, snapshot.notes])
   const connectNotes = async (from: string, to: string) => {
     setLinkFrom(null); setLinkCursor(null)
     if (from === to) return
@@ -199,15 +313,19 @@ export default function BoardCanvas({ repo, sessions, isVisible = true, onWork, 
     return false
   }
   const onWheel = (event: ReactWheelEvent) => {
+    cancelAnimationFrame(flight.current)
     event.preventDefault()
     const rect = surface.current!.getBoundingClientRect()
     if (event.ctrlKey || event.metaKey) setViewport(value => zoomAtCursor(value, event.clientX - rect.left, event.clientY - rect.top, event.deltaY, event.deltaMode, .35, 1.8))
     else setViewport(value => ({ ...value, x: value.x - (event.shiftKey ? event.deltaY : event.deltaX), y: value.y - (event.shiftKey ? 0 : event.deltaY) }))
   }
   const startDrag = (event: ReactPointerEvent, type: Drag['type'], id?: string) => {
-    if (event.button !== 0 || (snapshot.readOnly && type !== 'pan')) return
+    cancelAnimationFrame(flight.current)
+    if (event.button !== 0 || (snapshot.readOnly && type !== 'pan' && type !== 'lasso')) return
     event.preventDefault(); event.stopPropagation(); setMenu(null)
-    drag.current = { type, id, startX: event.clientX, startY: event.clientY, startViewport: viewportRef.current, startPosition: id ? positionsRef.current[id] : undefined, startSection: type === 'section' || type === 'resize' ? sectionsRef.current.find(s => s.id === id) : undefined, originalPositions: type === 'section' ? { ...positionsRef.current } : undefined, moved: false }
+    if (type === 'note' && id && event.shiftKey) { suppressOpen.current = id; togglePick(id); return }
+    const group = type === 'note' && id && pickedRef.current.has(id) && pickedRef.current.size > 1 ? [...pickedRef.current] : undefined
+    drag.current = { group, type, id, startX: event.clientX, startY: event.clientY, startViewport: viewportRef.current, startPosition: id ? positionsRef.current[id] : undefined, startSection: type === 'section' || type === 'resize' ? sectionsRef.current.find(s => s.id === id) : undefined, originalPositions: type === 'section' || group ? { ...positionsRef.current } : undefined, moved: false }
   }
   useEffect(() => {
     const move = (event: PointerEvent) => {
@@ -216,6 +334,14 @@ export default function BoardCanvas({ repo, sessions, isVisible = true, onWork, 
       const dx = event.clientX - item.startX, dy = event.clientY - item.startY
       if (Math.abs(dx) + Math.abs(dy) > 3) item.moved = true
       if (item.type === 'pan') setViewport({ ...item.startViewport, x: item.startViewport.x + dx, y: item.startViewport.y + dy })
+      else if (item.type === 'lasso') {
+        const rect = surface.current?.getBoundingClientRect()
+        if (rect) setLasso({ x: Math.min(item.startX, event.clientX) - rect.left, y: Math.min(item.startY, event.clientY) - rect.top, width: Math.abs(dx), height: Math.abs(dy) })
+      }
+      else if (item.type === 'note' && item.group) {
+        const zx = dx / item.startViewport.zoom, zy = dy / item.startViewport.zoom
+        setPositions(prev => { const next = { ...prev }; for (const id of item.group!) { const start = item.originalPositions?.[id]; if (start) next[id] = { x: Math.round(start.x + zx), y: Math.round(start.y + zy) } } return next })
+      }
       else if (item.type === 'note' && item.id && item.startPosition) setPositions(prev => ({ ...prev, [item.id!]: { x: Math.round(item.startPosition!.x + dx / item.startViewport.zoom), y: Math.round(item.startPosition!.y + dy / item.startViewport.zoom) } }))
       else if (item.type === 'section' && item.id && item.startSection) {
         const sx = Math.round(dx / item.startViewport.zoom), sy = Math.round(dy / item.startViewport.zoom)
@@ -226,6 +352,28 @@ export default function BoardCanvas({ repo, sessions, isVisible = true, onWork, 
     }
     const up = () => {
       const item = drag.current; drag.current = null
+      if (item?.type === 'lasso') {
+        // Pick every card the lasso touches, adding to the current picks.
+        const box = lassoRef.current, view = viewportRef.current
+        setLasso(null)
+        if (!box || box.width + box.height < 6) return
+        const left = (box.x - view.x) / view.zoom, top = (box.y - view.y) / view.zoom, right = left + box.width / view.zoom, bottom = top + box.height / view.zoom
+        const hits = Object.entries(positionsRef.current).filter(([id, p]) => p.x < right && p.x + cardWidth > left && p.y < bottom && p.y + cardHeight > top && snapshot.notes.some(note => note.id === id)).map(([id]) => id)
+        setPicked(current => new Set([...current, ...hits]))
+        return
+      }
+      if (item?.type === 'pan' && !item.moved) { setPicked(current => current.size ? new Set() : current); return }
+      if (item?.type === 'note' && item.group && item.moved) {
+        suppressOpen.current = item.id ?? null
+        for (const id of item.group) {
+          const position = positionsRef.current[id], note = snapshot.notes.find(n => n.id === id)
+          if (!position || !note) continue
+          const center = { x: position.x + cardWidth / 2, y: position.y + cardHeight / 2 }
+          const target = sectionsRef.current.find(s => !s.collapsed && center.x >= s.x && center.x <= s.x + s.width && center.y >= s.y && center.y <= s.y + s.height)
+          void apply({ type: 'moveNote', id, position, sectionId: target?.id ?? '', expectedRevision: note.revision })
+        }
+        return
+      }
       if (!item?.id) return
       if (!item.moved && item.type === 'note') { setFocusTitleId(item.id); void openNote(item.id); return }
       if (!item.moved) return
@@ -250,19 +398,19 @@ export default function BoardCanvas({ repo, sessions, isVisible = true, onWork, 
     const key = (event: KeyboardEvent) => {
       if (!isVisible) return
       if (event.key === 'Escape') {
-        setMenu(null); setSearchOpen(false); setFilterOpen(false); setShowTrash(false); setLinkFrom(null); setLinkCursor(null)
+        setMenu(null); setSearchOpen(false); setFilterOpen(false); setShowTrash(false); setLinkFrom(null); setLinkCursor(null); setPicked(current => current.size ? new Set() : current)
         if (selectedId && !(event.target instanceof Element && event.target.closest('select'))) {
           const commit = beforeSwitch.current
           void (commit ? commit() : Promise.resolve(true)).then(ok => { if (ok) closeNote(selectedId) })
         }
         return
       }
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); searchInput.current?.focus(); setSearchOpen(true); return }
       const target = event.target as HTMLElement
       if (target.closest('input,textarea,select,[contenteditable=true]')) return
+      if (event.key === '/' && !event.metaKey && !event.ctrlKey) { event.preventDefault(); searchInput.current?.focus(); setSearchOpen(true); return }
       if (event.key.toLowerCase() === 'n') { event.preventDefault(); void create('note', centerWorld()) }
       if (event.key.toLowerCase() === 't') { event.preventDefault(); void create('task', centerWorld()) }
-      if (event.key.toLowerCase() === 'f') { event.preventDefault(); fit(snapshot, surface.current, setViewport) }
+      if (event.key.toLowerCase() === 'f') { event.preventDefault(); fitView() }
     }
     window.addEventListener('keydown', key); return () => window.removeEventListener('keydown', key)
   }, [snapshot, repo, isVisible, selectedId])
@@ -308,15 +456,15 @@ export default function BoardCanvas({ repo, sessions, isVisible = true, onWork, 
       <div className="kb-capture-actions"><button className="kb-add" disabled={snapshot.readOnly} onClick={() => void create('note', centerWorld())}><Plus size={16} /> Note <kbd>N</kbd></button><button className="kb-task-add" disabled={snapshot.readOnly} onClick={() => void create('task', centerWorld())}><Plus size={15} /> Task</button><button className="kb-more-add" disabled={snapshot.readOnly} aria-label="More ways to add to canvas" title="Add codebase context or section" onClick={e => { const rect = e.currentTarget.getBoundingClientRect(); setMenu({ x: rect.left, y: rect.bottom + 7, world: centerWorld() }) }}><ChevronDown size={15} /></button></div>
       <div className="kb-tools"><span className="kb-storage" title={bridge.desktop ? `Board files: ${repo}/.agents-hub/notes/*.md · layout: ${repo}/.agents-hub/canvas.json` : 'Browser preview: board changes are stored in local browser storage'}><Folder size={13} />{bridge.desktop ? '.agents-hub' : 'Preview storage'}</span>
         <OrganizerPanel repo={repo} snapshot={snapshot} blocked={!!selectedId || !!capture || !!drag.current} onRefresh={refresh} onError={onError} onOrganizing={setOrganizing} />
-        <div className="kb-search-wrap"><Search size={15} /><input ref={searchInput} value={search} onChange={e => { setSearch(e.target.value); setSearchOpen(true) }} onFocus={() => setSearchOpen(true)} placeholder="Search board" aria-label="Search all board notes" /><kbd>⌘ K</kbd>{search && <button aria-label="Clear search" onClick={() => setSearch('')}><X size={13} /></button>}
+        <div className="kb-search-wrap"><Search size={15} /><input ref={searchInput} value={search} onChange={e => { setSearch(e.target.value); setSearchOpen(true) }} onFocus={() => setSearchOpen(true)} placeholder="Search board" aria-label="Search all board notes" /><kbd>/</kbd>{search && <button aria-label="Clear search" onClick={() => setSearch('')}><X size={13} /></button>}
           {searchOpen && search.trim() && <div className="kb-search-results"><div className="kb-search-caption">{matches.length} matching notes · including offscreen</div>{matches.slice(0, 12).map(note => <button key={note.id} onClick={() => focusNote(note)}>{kindIcon(note.kind)}<span><strong>{note.title}</strong><small>{kindLabel[note.kind]}{note.status ? ` · ${statusLabel[note.status]}` : ''}</small></span><ArrowDownRight size={13} /></button>)}{!matches.length && <p>No matches. Try another subject or clear the filter.</p>}</div>}</div>
         <div className="kb-filter-wrap"><button className="kb-filter-trigger" aria-expanded={filterOpen} onClick={() => setFilterOpen(value => !value)}>{filter === 'all' ? 'All' : filter === 'context' ? 'Context' : filter === 'task' ? 'Tasks' : 'Notes'} <span>{filter === 'all' ? snapshot.notes.length : counts[filter]}</span><ChevronDown size={13} /></button>{filterOpen && <div className="kb-filter-popover"><div className="kb-filter-set">{([['all', 'All', snapshot.notes.length], ['task', 'Tasks', counts.task], ['context', 'Context', counts.context], ['note', 'Notes', counts.note]] as const).map(([value, label, count]) => <button key={value} className={filter === value ? 'active' : ''} onClick={() => { setFilter(value); setFilterOpen(false) }}>{label}<span>{count}</span></button>)}</div><div className="kb-filter-right"><button onClick={() => setShowDone(v => !v)}>{showDone ? 'Hide completed' : 'Show completed'}</button><button onClick={() => { setFilterOpen(false); void loadTrash() }}><Trash2 size={12} /> Trash</button></div></div>}</div>
-        <button className="kb-tool-icon" title="Fit all notes (F)" aria-label="Fit all notes" onClick={() => fit(snapshot, surface.current, setViewport)}><Maximize2 size={16} /></button>
+        <button className="kb-tool-icon" title="Fit all notes (F)" aria-label="Fit all notes" onClick={fitView}><Maximize2 size={16} /></button>
       </div>
     </header>
     {!!snapshot.errors.length && <div className="kb-warning" role="alert"><CircleHelp size={14} /><span>{snapshot.errors.slice(0, 2).join(' · ')}</span><button onClick={() => void refresh()}>Refresh</button></div>}
     {loadError && <div className="kb-warning" role="alert"><CircleHelp size={14} /><span>Could not load board: {loadError}</span><button onClick={() => void refresh().catch(error => setLoadError((error as Error).message))}>Retry</button></div>}
-    <div className="kb-main" style={organizing ? { pointerEvents: 'none' } : undefined}><div className="kb-viewport" ref={surface} onWheel={onWheel} onPointerDown={event => { if (event.target === event.currentTarget || (event.target as HTMLElement).classList.contains('kb-world')) startDrag(event, 'pan') }} onDoubleClick={event => { if (event.target === event.currentTarget || (event.target as HTMLElement).classList.contains('kb-world')) void create('note', worldAt(event.clientX, event.clientY)) }} onContextMenu={event => { event.preventDefault(); setMenu({ x: event.clientX, y: event.clientY, world: worldAt(event.clientX, event.clientY) }) }}>
+    <div className="kb-main" style={organizing ? { pointerEvents: 'none' } : undefined}><div className="kb-viewport" ref={surface} onWheel={onWheel} onPointerDown={event => { if (event.target === event.currentTarget || (event.target as HTMLElement).classList.contains('kb-world')) startDrag(event, event.shiftKey ? 'lasso' : 'pan') }} onDoubleClick={event => { if (event.target === event.currentTarget || (event.target as HTMLElement).classList.contains('kb-world')) void create('note', worldAt(event.clientX, event.clientY)) }} onContextMenu={event => { event.preventDefault(); setMenu({ x: event.clientX, y: event.clientY, world: worldAt(event.clientX, event.clientY) }) }}>
       <div className="kb-grid" style={{ backgroundPosition: `${viewport.x}px ${viewport.y}px`, backgroundSize: `${26 * viewport.zoom}px ${26 * viewport.zoom}px` }} />
       <div className="kb-world" style={{ transform: `translate(${viewport.x}px,${viewport.y}px) scale(${viewport.zoom})` }}>
         {sections.map(section => <div key={section.id} className={`kb-section${section.collapsed ? ' collapsed' : ''}`} style={{ left: section.x, top: section.y, width: section.width, height: section.collapsed ? 52 : section.height }} onContextMenu={event => { event.preventDefault(); event.stopPropagation(); setMenu({ x: event.clientX, y: event.clientY, world: worldAt(event.clientX, event.clientY), section: section.id }) }}><div className="kb-section-head"><button className="kb-section-grip" aria-label={`Move ${section.title} section`} onPointerDown={event => startDrag(event, 'section', section.id)}><Grip size={14} /></button>{renamingSection === section.id ? <input autoFocus value={sectionName} onChange={event => setSectionName(event.target.value)} onBlur={() => { void apply({ type: 'updateSection', id: section.id, patch: { title: sectionName } }); setRenamingSection(null) }} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); if (event.key === 'Escape') setRenamingSection(null) }} /> : <button className="kb-section-title" onDoubleClick={() => { setRenamingSection(section.id); setSectionName(section.title) }} onClick={() => void apply({ type: 'updateSection', id: section.id, patch: { collapsed: !section.collapsed } })}>{section.collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}{section.title}</button>}<span>{snapshot.notes.filter(n => n.sectionId === section.id).length}</span><button className="kb-section-menu" aria-label={`${section.title} actions`} onClick={event => { const rect = event.currentTarget.getBoundingClientRect(); setMenu({ x: rect.left, y: rect.bottom, world: { x: section.x, y: section.y }, section: section.id }) }}><MoreHorizontal size={16} /></button></div>{!section.collapsed && <button className="kb-section-resize" aria-label={`Resize ${section.title} section`} onPointerDown={event => startDrag(event, 'resize', section.id)} />}</div>)}
@@ -327,6 +475,11 @@ export default function BoardCanvas({ repo, sessions, isVisible = true, onWork, 
           if (section?.collapsed) return null
           const editing = selectedId === note.id
           const dimmed = !matchIds.has(note.id)
+          const live = liveAgent(note, sessions)
+          const age = Date.now() - new Date(note.updatedAt).getTime()
+          const fresh = Date.now() - new Date(note.createdAt).getTime() < 4000 ? ' is-new' : age < 4000 && note.updatedBy !== 'person' ? ' agent-touched' : ''
+          const lastLog = note.log?.at(-1)
+          const stale = freshness[note.id]?.stale ? freshness[note.id] : null
           return <article
             key={note.id}
             data-note-id={note.id}
@@ -346,14 +499,22 @@ export default function BoardCanvas({ repo, sessions, isVisible = true, onWork, 
               if (suppressOpen.current === note.id) { suppressOpen.current = null; event.preventDefault(); event.stopPropagation(); return }
               if (linkFrom && linkFrom !== note.id) { event.preventDefault(); event.stopPropagation(); void connectNotes(linkFrom, note.id) }
             }}
-            className={`kb-card kind-${note.kind}${editing ? ' editing selected' : ''}${dimmed ? ' dimmed' : ''}${linkFrom && linkFrom !== note.id ? ' link-target' : ''}`}
+            className={`kb-card kind-${note.kind}${editing ? ' editing selected' : ''}${dimmed ? ' dimmed' : ''}${linkFrom && linkFrom !== note.id ? ' link-target' : ''}${note.question ? ' asking' : ''}${live ? ` live-${live.state}` : ''}${draggingAgent && canTake(note) ? ' drop-ready' : ''}${dropTarget === note.id ? ' drop-target' : ''}${fresh}${stale ? ' is-stale' : ''}${picked.has(note.id) ? ' picked' : ''}`}
+            onDragOver={event => { if (!canTake(note) || !event.dataTransfer.types.includes(AGENT_DRAG)) return; event.preventDefault(); event.dataTransfer.dropEffect = 'link'; if (dropTarget !== note.id) setDropTarget(note.id) }}
+            onDragLeave={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDropTarget(current => current === note.id ? null : current) }}
+            onDrop={event => { const terminalId = event.dataTransfer.getData(AGENT_DRAG); setDropTarget(null); setDraggingAgent(null); if (terminalId && canTake(note)) { event.preventDefault(); onDispatch(note.id, terminalId) } }}
             style={{ left: pos.x, top: pos.y, width: editing ? editorWidth : cardWidth, ...(editing ? { height: editorHeight, transform: `scale(${1 / viewport.zoom})` } : {}) }}
             onWheel={event => { if (editing) event.stopPropagation() }}
             onContextMenu={event => { event.stopPropagation(); if (!editing) { event.preventDefault(); setMenu({ x: event.clientX, y: event.clientY, world: worldAt(event.clientX, event.clientY), target: note.id }) } }}
           >
-            {editing ? <Inspector key={note.id} repo={repo} note={note} notes={snapshot.notes} sections={sections} sessions={sessions} focusTitle={focusTitleId === note.id} onClose={() => closeNote(note.id)} onDragStart={event => { if (!(event.target as HTMLElement).closest('button,input,select,textarea')) startDrag(event, 'note', note.id) }} apply={apply} onWork={onWork} onFocus={focusNote} onError={onError} registerSwitch={fn => { beforeSwitch.current = fn }} /> : <>
+            {editing ? <Inspector key={note.id} repo={repo} note={note} notes={snapshot.notes} sections={sections} sessions={sessions} focusTitle={focusTitleId === note.id} onClose={() => closeNote(note.id)} onDragStart={event => { if (!(event.target as HTMLElement).closest('button,input,select,textarea')) startDrag(event, 'note', note.id) }} apply={apply} freshness={freshness[note.id]} worktree={worktrees[note.id] ?? undefined} onOpenTerminal={onOpenTerminal} agents={agents} onDispatch={onDispatch} onNewAgent={onNewAgent} onFocus={focusNote} onError={onError} registerSwitch={fn => { beforeSwitch.current = fn }} /> : <>
               <div className="kb-card-top" onPointerDown={event => { if (!(event.target as HTMLElement).closest('button,input,select,textarea')) startDrag(event, 'note', note.id) }}><span className="kb-card-kind">{kindIcon(note.kind)}{note.kind === 'context' ? 'CONTEXT' : note.kind.toUpperCase()}</span><div className="kb-card-controls"><button className="kb-card-link" aria-label={`Link ${note.title} to another note`} title="Drag to another note, or click then choose a note" disabled={snapshot.readOnly} onPointerDown={event => { event.preventDefault(); event.stopPropagation(); linkPointer.current = { from: note.id, x: event.clientX, y: event.clientY, moved: false }; setLinkFrom(note.id); setLinkCursor(worldAt(event.clientX, event.clientY)) }} onClick={event => event.stopPropagation()}><Link2 size={13} /></button></div></div>
               <button className="kb-card-open" onPointerDown={event => startDrag(event, 'note', note.id)} onClick={() => { setFocusTitleId(note.id); void openNote(note.id) }}><strong>{note.title}</strong>{note.body && <span>{note.body}</span>}</button>
+              {note.question ? <div className="kb-card-question" title={note.question.text}><CircleHelp size={13} /><span>{note.question.text}</span></div>
+                : live ? <button className={`kb-card-live state-${live.state}`} title={`${live.name}: ${live.status} · show terminal`} onPointerDown={event => event.stopPropagation()} onClick={event => { event.stopPropagation(); onOpenTerminal(live.terminalId) }}><i /><span><strong>{live.name}</strong> {live.status}</span></button>
+                : stale ? <div className="kb-card-stale" title={stale.reasons.join('\n')}><AlertTriangle size={12} /><span>Re-verify · {stale.reasons[0]}</span></div>
+                : lastLog && note.status !== 'done' ? <div className="kb-card-log" title={lastLog.text}><CornerDownRight size={12} /><span>{lastLog.text}</span><time>{ago(lastLog.at)}</time></div> : null}
+              {note.worktree && <div className="kb-card-branch" title={`${note.worktree.branch}\n${note.worktree.path}`}><GitBranch size={11} /><span>{shortBranch(note.worktree.branch)}</span>{worktrees[note.id] && (worktrees[note.id]!.exists ? <small><b className="plus">+{worktrees[note.id]!.insertions}</b> <b className="minus">−{worktrees[note.id]!.deletions}</b>{worktrees[note.id]!.commits ? ` · ${worktrees[note.id]!.commits}c` : ''}</small> : <small>removed</small>)}</div>}
               <div className="kb-card-foot"><span>{note.status ? <><i className={`kb-status status-${note.status}`} />{statusLabel[note.status]}</> : note.kind === 'context' ? 'CODEBASE CONTEXT' : 'NOTE'}</span><span>{date(note.updatedAt)}</span></div>
             </>}
           </article>
@@ -361,8 +522,27 @@ export default function BoardCanvas({ repo, sessions, isVisible = true, onWork, 
       </div>
       {!loading && !loadError && !snapshot.notes.length && <div className="kb-empty"><h3>No notes yet</h3><p>Write an idea. You can turn it into a task later.</p><div><button className="kb-add" disabled={snapshot.readOnly} onClick={() => void create('note', centerWorld())}><Plus size={15} /> Add note</button></div><small>N: note · double-click: note · right-click: more</small></div>}
       {capture && <QuickCapture key={`${capture.kind}:${capture.position.x}:${capture.position.y}`} capture={capture} onSave={text => saveCapture(capture, text)} onClose={() => setCapture(null)} />}
-      <div className="kb-canvas-hint"><span>{linkFrom ? 'CHOOSE A NOTE TO LINK · ESC TO CANCEL' : 'DOUBLE-CLICK: NOTE · N: NOTE · T: TASK · DRAG: PAN'}</span></div>
-      <div className="kb-zoom"><button aria-label="Zoom out" onClick={() => setViewport(v => ({ ...v, zoom: clamp(v.zoom - .15, .35, 1.8) }))}><Minus size={15} /></button><span>{Math.round(viewport.zoom * 100)}%</span><button aria-label="Zoom in" onClick={() => setViewport(v => ({ ...v, zoom: clamp(v.zoom + .15, .35, 1.8) }))}><Plus size={15} /></button><button aria-label="Fit canvas" onClick={() => fit(snapshot, surface.current, setViewport)}><Focus size={15} /></button></div>
+      {lasso && <div className="kb-lasso" style={{ left: lasso.x, top: lasso.y, width: lasso.width, height: lasso.height }} />}
+      {pickedNotes.length > 0 && <div className="kb-selection" role="toolbar" aria-label="Selected notes">
+        <span className="kb-pack-handle" draggable title="Drag onto an agent to send these notes as context"
+          onDragStart={event => { event.dataTransfer.setData(PACK_DRAG, [...picked].join(',')); event.dataTransfer.effectAllowed = 'copy'; setDraggingPack(true) }}
+          onDragEnd={() => { setDraggingPack(false); setPackTarget(null) }}><Grip size={13} /><strong>{pickedNotes.length} selected</strong><small>~{Math.ceil(pack.length / 4).toLocaleString()} tokens</small></span>
+        <div className="kb-hand"><button className="kb-work" aria-expanded={packMenu} onClick={() => setPackMenu(value => !value)}><Command size={13} /> Send to agent</button>{packMenu && <div className="kb-hand-menu kb-hand-menu-down" role="menu">{agents.map(agent => <button role="menuitem" key={agent.id} onClick={() => void sendPack(agent.id)}><span className={`status-dot state-${terminalState(agent)}`} /><strong>{agent.name}</strong><small>{terminalStatus(agent)}</small></button>)}{!agents.length && <button role="menuitem" className="kb-hand-new" onClick={() => { setPackMenu(false); onNewAgent() }}><Plus size={13} /> New agent…</button>}</div>}</div>
+        <button onClick={() => void taskFromPicks()} disabled={snapshot.readOnly}><Plus size={13} /> Task from these</button>
+        <button className="kb-selection-clear" aria-label="Clear selection" title="Clear selection (Esc)" onClick={() => setPicked(new Set())}><X size={14} /></button>
+      </div>}
+      <div className={`kb-agents${selectedId ? ' receded' : ''}`} aria-label="Agents: drag onto a task to hand it over">
+        {agents.map(agent => { const state = terminalState(agent); return <button key={agent.id} className={`kb-puck state-${state}${draggingPack ? ' pack-ready' : ''}${packTarget === agent.id ? ' pack-target' : ''}`} draggable
+          onDragOver={event => { if (!event.dataTransfer.types.includes(PACK_DRAG)) return; event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; setPackTarget(agent.id) }}
+          onDragLeave={() => setPackTarget(current => current === agent.id ? null : current)}
+          onDrop={event => { if (!event.dataTransfer.types.includes(PACK_DRAG)) return; event.preventDefault(); setPackTarget(null); setDraggingPack(false); void sendPack(agent.id) }} title={`${agent.name} · ${terminalStatus(agent)}\nDrag onto a task to hand it over · click to show`}
+          onDragStart={event => { event.dataTransfer.setData(AGENT_DRAG, agent.id); event.dataTransfer.effectAllowed = 'link'; setDraggingAgent(agent.id) }}
+          onDragEnd={() => { setDraggingAgent(null); setDropTarget(null) }}
+          onClick={() => onOpenTerminal(agent.id)}><span className="kb-puck-face">{initials(agent.name)}</span><span className="kb-puck-name">{agent.name}</span></button> })}
+        <button className="kb-puck kb-puck-new" title="Start a new agent" onClick={onNewAgent}><span className="kb-puck-face"><Plus size={14} /></span><span className="kb-puck-name">Agent</span></button>
+      </div>
+      <div className="kb-canvas-hint"><span>{linkFrom ? 'CHOOSE A NOTE TO LINK · ESC TO CANCEL' : 'DOUBLE-CLICK: NOTE · N/T: NOTE/TASK · SHIFT-DRAG: SELECT · ⌘K: JUMP'}</span></div>
+      <div className="kb-zoom"><button aria-label="Zoom out" onClick={() => zoomBy(-.15)}><Minus size={15} /></button><span>{Math.round(viewport.zoom * 100)}%</span><button aria-label="Zoom in" onClick={() => zoomBy(.15)}><Plus size={15} /></button><button aria-label="Fit canvas" onClick={fitView}><Focus size={15} /></button></div>
     </div>
       {showTrash && <aside className="kb-trash"><header><div><h3>Trash</h3></div><button aria-label="Close trash" onClick={() => setShowTrash(false)}><X size={16} /></button></header>{trash.length ? trash.map(note => <div key={note.id}><strong>{note.title}</strong><span>{kindLabel[note.kind]}</span><button onClick={() => void apply({ type: 'restoreNote', id: note.id }).then(() => loadTrash())}>Restore</button></div>) : <p>No notes in trash.</p>}</aside>}
     </div>
@@ -406,7 +586,7 @@ function fit(snapshot: BoardSnapshot, element: HTMLDivElement | null, setViewpor
   setViewport({ x: rect.width / 2 - (minX + maxX) / 2 * zoom, y: rect.height / 2 - (minY + maxY) / 2 * zoom, zoom })
 }
 
-function Inspector({ repo, note, notes, sections, sessions, focusTitle, onClose, onDragStart, apply, onWork, onFocus, onError, registerSwitch }: { repo: string; note: BoardNote; notes: BoardNote[]; sections: BoardSection[]; sessions: RepoContext[]; focusTitle: boolean; onClose: () => void; onDragStart: (event: ReactPointerEvent) => void; apply: (command: BoardCommand) => Promise<unknown>; onWork: (sessionId: string, task: BoardNote) => void; onFocus: (note: BoardNote) => void; onError: (message: string) => void; registerSwitch: (fn: (() => Promise<boolean>) | null) => void }) {
+function Inspector({ repo, note, notes, sections, sessions, focusTitle, onClose, onDragStart, apply, freshness, worktree, onOpenTerminal, agents, onDispatch, onNewAgent, onFocus, onError, registerSwitch }: { repo: string; note: BoardNote; notes: BoardNote[]; sections: BoardSection[]; sessions: RepoContext[]; focusTitle: boolean; onClose: () => void; onDragStart: (event: ReactPointerEvent) => void; apply: (command: BoardCommand) => Promise<unknown>; freshness?: Freshness; worktree?: WorktreeStatus; onOpenTerminal: (terminalId: string) => void; agents: TerminalResource[]; onDispatch: (taskId: string, terminalId: string) => void; onNewAgent: () => void; onFocus: (note: BoardNote) => void; onError: (message: string) => void; registerSwitch: (fn: (() => Promise<boolean>) | null) => void }) {
   const [draft, setDraft] = useState(note)
   const draftRef = useRef(note)
   const savedRef = useRef(note)
@@ -475,7 +655,9 @@ function Inspector({ repo, note, notes, sections, sessions, focusTitle, onClose,
   const edit = (update: (current: BoardNote) => BoardNote) => setDraft(current => { const next = update(current); draftRef.current = next; return next })
   const replaceDraft = (next: BoardNote) => { draftRef.current = next; setDraft(next) }
   useEffect(() => { if (focusTitle) { titleRef.current?.focus(); titleRef.current?.select() } }, [focusTitle])
-  const stale = note.revision !== savedRevision && !savingRef.current
+  // Stale edits are merged field by field on save, so only a failed save
+  // against a newer revision is a real conflict.
+  const stale = note.revision !== savedRevision && !savingRef.current && saveState === 'error'
   const dirty = changed(draft, savedRef.current)
   const related = notes.filter(item => draft.links.some(link => link.to === item.id) || item.links.some(link => link.to === note.id))
   const save = async (): Promise<BoardNote | null> => {
@@ -530,13 +712,23 @@ function Inspector({ repo, note, notes, sections, sessions, focusTitle, onClose,
     const updated = await apply({ type: 'updateNote', id: owner.id, expectedRevision: owner.revision, patch: { links: owner.links.filter(link => link.to !== to), updatedBy: 'person' } }) as BoardNote | null
     if (updated && owner.id === note.id) { savedRef.current = updated; edit(current => ({ ...current, links: updated.links })); setSavedRevision(updated.revision) }
   }
-  const work = async () => {
-    if (!draft.sessionId) { onError('Choose a Session for this task.'); return }
-    if (stale) { onError('This task changed on disk. Reload it before starting work.'); return }
+  const [handOpen, setHandOpen] = useState(false)
+  // The agent already on this task, preferring one that is running.
+  const assigned = draft.sessionId ? agents.find(agent => agent.contextId === draft.sessionId && agent.terminalRunning) ?? agents.find(agent => agent.contextId === draft.sessionId) : undefined
+  const wrapUp = async () => {
+    if (!assigned) return
     const saved = await save()
     if (!saved) return
-    const working = saved.status === 'working' ? saved : await apply({ type: 'updateNote', id: saved.id, expectedRevision: saved.revision, patch: { status: 'working', updatedBy: 'person' } }) as BoardNote | null
-    if (working) onWork(draft.sessionId, working)
+    try {
+      const delivery = await bridge.invoke<'sent' | 'queued'>('terminal:deliver', { id: assigned.id, text: `Please wrap up Task ${saved.id} ("${saved.title}"): verify its acceptance checks, then call board_complete_task with the outcome, the checks you verified, and one concise, evidence-backed codebase learning (or a no-learning reason if nothing durable was learned). Read the Task first for its current revision.` })
+      onError(delivery === 'queued' ? `${assigned.name} will wrap up when it is idle.` : `Asked ${assigned.name} to wrap up.`)
+    } catch (error) { onError((error as Error).message) }
+  }
+  const handTo = async (terminalId: string) => {
+    setHandOpen(false)
+    if (stale) { onError('This task changed on disk. Reload it before handing it over.'); return }
+    const saved = await save()
+    if (saved) onDispatch(saved.id, terminalId)
   }
   const complete = async () => {
     const hasLearning = !!learningBody.trim()
@@ -552,7 +744,7 @@ function Inspector({ repo, note, notes, sections, sessions, focusTitle, onClose,
   const openHistory = async () => { try { setHistory(await bridge.invoke<Array<{ revision: string; note: BoardNote }>>('board:query', { repo, query: { type: 'history', id: note.id } })) } catch (error) { onError((error as Error).message) } }
   return <div className="kb-inspector" aria-label={`${kindLabel[note.kind]} editor`} onPaste={event => { const files = Array.from(event.clipboardData.files); if (files.some(file => file.type.startsWith('image/'))) { event.preventDefault(); void addImages(files) } }} onDragOver={event => { if (Array.from(event.dataTransfer.items).some(item => item.kind === 'file')) event.preventDefault() }} onDrop={event => { const files = Array.from(event.dataTransfer.files); if (files.length) { event.preventDefault(); void addImages(files) } }}><div className="kb-inspector-top" onPointerDown={onDragStart}><span className="kb-eyebrow">{kindIcon(draft.kind)} {kindLabel[draft.kind].toUpperCase()} <span className="kb-inspector-id">/ {note.id}</span></span><button aria-label="Close note" title="Close note" onClick={() => void close()}><X size={17} /></button></div>
     {stale && <div className="kb-inspector-stale">This note changed outside the editor. Your draft is preserved. <button onClick={() => { replaceDraft(note); savedRef.current = note; setSavedRevision(note.revision); setSaveState('saved') }}>Reload latest</button><button onClick={() => void navigator.clipboard.writeText(draft.body).catch(() => onError('Could not copy the draft.'))}>Copy draft</button></div>}
-    <div className="kb-inspector-scroll"><label className="kb-inspector-title"><span>Title</span><input ref={titleRef} value={draft.title} onChange={e => edit(d => ({ ...d, title: e.target.value }))} maxLength={160} /></label>
+    <div className="kb-inspector-scroll">{note.question && <QuestionPanel repo={repo} note={note} onError={onError} />}{note.kind === 'context' && freshness?.stale && <StalePanel note={note} freshness={freshness} apply={apply} onFocus={onFocus} onError={onError} />}<label className="kb-inspector-title"><span>Title</span><input ref={titleRef} value={draft.title} onChange={e => edit(d => ({ ...d, title: e.target.value }))} maxLength={160} /></label>
       <div className="kb-inspector-meta"><label>Type<select value={draft.kind} onChange={e => edit(d => ({ ...d, kind: e.target.value as NoteKind }))}><option value="task">Task</option><option value="context">Codebase context</option><option value="note">Note</option></select></label>{draft.kind === 'task' && <label>Status<select value={draft.status ?? 'open'} onChange={e => edit(d => ({ ...d, status: e.target.value as TaskState }))}>{(['open', 'working', 'blocked', ...(draft.status === 'done' ? ['done'] : [])] as TaskState[]).map(value => <option key={value} value={value}>{statusLabel[value]}</option>)}</select></label>}</div>
       <label className="kb-field">Section<select value={draft.sectionId} onChange={e => edit(d => ({ ...d, sectionId: e.target.value }))}><option value="">No section</option>{sections.map(section => <option key={section.id} value={section.id}>{section.title}</option>)}</select></label>
       <div className="kb-body-label"><label htmlFor="kb-body">{draft.kind === 'task' ? 'Brief' : draft.kind === 'context' ? 'What we know' : 'Thoughts'}</label><button onClick={() => setPreview(v => !v)}>{preview ? 'Edit' : 'Preview'}</button></div>{preview ? <div className="kb-markdown"><ReactMarkdown remarkPlugins={[remarkGfm]}>{draft.body || '*Nothing written yet.*'}</ReactMarkdown></div> : <textarea ref={bodyInput} id="kb-body" className="kb-body" value={draft.body} onChange={e => edit(d => ({ ...d, body: e.target.value }))} placeholder={draft.kind === 'task' ? 'What needs to change? What would success look like?' : draft.kind === 'context' ? 'A concise, evidence-backed fact about this repository…' : 'A question, hypothesis, observation, or idea…'} />}
@@ -560,9 +752,129 @@ function Inspector({ repo, note, notes, sections, sessions, focusTitle, onClose,
       <div className="kb-image-section"><div><span>Images</span><button type="button" onClick={() => imageInput.current?.click()}><ImagePlus size={14} /> Add image</button><input ref={imageInput} type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden onChange={event => { void addImages(Array.from(event.target.files ?? [])); event.target.value = '' }} /></div>{(draft.images ?? []).map(image => <div className="kb-image-row" key={image.id}>{imagePreviews[image.id] ? <img src={imagePreviews[image.id]} alt={image.description || image.name} /> : <div className="kb-image-missing">Preview unavailable</div>}<div><strong>{image.name}</strong><input aria-label={`Description for ${image.name}`} value={image.description ?? ''} placeholder="Describe this image for the agent" onChange={event => edit(current => ({ ...current, images: (current.images ?? []).map(item => item.id === image.id ? { ...item, description: event.target.value } : item) }))} /></div><button type="button" aria-label={`Remove ${image.name}`} onClick={() => edit(current => ({ ...current, images: (current.images ?? []).filter(item => item.id !== image.id) }))}><X size={14} /></button></div>)}</div>
       {draft.kind === 'task' && <><label className="kb-field">Acceptance checks<textarea rows={3} value={(draft.acceptance ?? []).join('\n')} onChange={e => edit(d => ({ ...d, acceptance: e.target.value.split('\n') }))} placeholder="One observable check per line" /></label><div className="kb-inspector-meta"><label>Session<select value={draft.sessionId ?? ''} onChange={e => edit(d => ({ ...d, sessionId: e.target.value }))}><option value="">No Session</option>{sessions.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}</select></label><label>Agent<input value={draft.agent ?? ''} onChange={e => edit(d => ({ ...d, agent: e.target.value }))} placeholder="Optional" /></label></div><label className="kb-field">Outcome<textarea rows={3} value={draft.outcome ?? ''} onChange={e => edit(d => ({ ...d, outcome: e.target.value }))} placeholder="What changed? What did we verify?" /></label>{draft.status === 'done' && <div className={`kb-capture capture-${draft.captureState}`}>{draft.captureState === 'captured' ? 'Knowledge captured in codebase context' : draft.captureState === 'none' ? 'Completed with no durable learning' : draft.captureState === 'legacy_unknown' ? 'Imported completed task · historical learning unknown' : 'Knowledge capture pending'}</div>}</>}
       {draft.kind === 'context' && <><label className="kb-field">Subject<input value={draft.subject ?? ''} onChange={e => edit(d => ({ ...d, subject: e.target.value }))} placeholder="e.g. authentication persistence" /></label><label className="kb-field">Evidence paths<textarea rows={3} value={(draft.evidence ?? []).map(item => item.path).join('\n')} onChange={e => edit(d => ({ ...d, evidence: e.target.value.split('\n').map(path => ({ path: path.trim() })).filter(item => item.path) }))} placeholder="server/auth.ts" /></label></>}
+      {note.kind === 'task' && note.worktree && <WorktreePanel repo={repo} note={note} status={worktree} sessions={sessions} onOpenTerminal={onOpenTerminal} onError={onError} />}
+      {note.kind === 'task' && note.status !== 'done' && !note.worktree && <SubtaskPanel repo={repo} note={note} notes={notes} agents={agents} onFocus={onFocus} onError={onError} />}
+      {!!note.log?.length && <ProgressLog entries={note.log} />}
       <div className="kb-related"><div><span className="kb-eyebrow">LINKED NOTES</span><span>{related.length}</span></div>{related.map(item => <div className="kb-related-row" key={item.id}><button onClick={() => onFocus(item)}>{kindIcon(item.kind)}<span>{item.title}</span><ChevronRight size={13} /></button><button className="kb-unlink" aria-label={`Unlink ${item.title}`} title="Remove link" onClick={() => void unlink(item)}><X size={13} /></button></div>)}<p>On the canvas, drag the link handle from one note to another. You can also click the handle, then click the destination.</p></div>
       {history && <div className="kb-history"><span className="kb-eyebrow">PREVIOUS VERSIONS</span>{history.map(item => <button key={item.revision} onClick={() => { replaceDraft({ ...item.note, revision: savedRevision }); setHistory(null) }}>{date(item.note.updatedAt)} · {item.note.title}</button>)}{!history.length && <p>No earlier versions yet.</p>}</div>}
       {draft.kind === 'task' && learning && <div className="kb-learning"><div className="kb-learning-head"><BookOpen size={16} /><span>Codebase context</span></div><p>Record a fact another Session should be able to retrieve.</p><label>Update existing context<select value={learningTarget} onChange={e => { const id = e.target.value; setLearningTarget(id); const target = notes.find(n => n.id === id); if (target) { setLearningTitle(target.title); setLearningSubject(target.subject ?? ''); setLearningBody(target.body); setEvidence((target.evidence ?? []).map(x => x.path).join('\n')) } }}><option value="">Create new context note</option>{notes.filter(n => n.kind === 'context').map(n => <option key={n.id} value={n.id}>{n.title}</option>)}</select></label><label>Title<input value={learningTitle} onChange={e => setLearningTitle(e.target.value)} placeholder="Specific codebase fact" /></label><label>Subject<input value={learningSubject} onChange={e => setLearningSubject(e.target.value)} placeholder="e.g. database migrations" /></label><label>Concise fact<textarea rows={4} value={learningBody} onChange={e => setLearningBody(e.target.value)} placeholder="What did the code or tests prove?" /></label><label>Evidence paths<textarea rows={2} value={evidence} onChange={e => setEvidence(e.target.value)} placeholder="One file path per line" /></label><div className="kb-learning-or">or</div><label>No durable learning<input value={noLearning} onChange={e => setNoLearning(e.target.value)} placeholder="Why nothing needs to be saved" /></label><div className="kb-learning-actions"><button onClick={() => setLearning(false)}>Cancel</button><button className="kb-action" onClick={() => void complete()}>Complete task</button></div></div>}
-    </div><footer className="kb-inspector-actions"><button title="View history" aria-label="View note history" onClick={() => void openHistory()}><History size={16} /></button>{draft.kind === 'task' && !learning && <button className="kb-work" onClick={() => void work()}><Command size={14} /> Work in Session</button>}{draft.kind === 'task' && !learning && <button className="kb-work" onClick={() => setLearning(true)}><Check size={14} /> Complete</button>}<span className={`kb-save-status state-${saveState}`} role="status">{stale ? 'Changed elsewhere' : saveState === 'error' ? 'Save failed' : dirty || saveState === 'saving' ? 'Saving…' : 'Saved'}</span>{saveState === 'error' && <button onClick={() => void save()}>Retry</button>}</footer>
+    </div><footer className="kb-inspector-actions"><button title="View history" aria-label="View note history" onClick={() => void openHistory()}><History size={16} /></button>{draft.kind === 'task' && !learning && draft.status !== 'done' && <div className="kb-hand"><button className="kb-work" aria-expanded={handOpen} onClick={() => setHandOpen(value => !value)}><Command size={14} /> Hand to agent</button>{handOpen && <div className="kb-hand-menu" role="menu">{agents.map(agent => <button role="menuitem" key={agent.id} onClick={() => void handTo(agent.id)}><span className={`status-dot state-${terminalState(agent)}`} /><strong>{agent.name}</strong><small>{terminalStatus(agent)}</small></button>)}<button role="menuitem" className="kb-hand-new" onClick={() => { setHandOpen(false); onNewAgent() }}><Plus size={13} /> New agent…</button></div>}</div>}{draft.kind === 'task' && !learning && draft.status !== 'done' && assigned && <button className="kb-work" title={`Ask ${assigned.name} to verify, complete, and capture what it learned`} onClick={() => void wrapUp()}><Check size={14} /> Wrap up</button>}{draft.kind === 'task' && !learning && <button className="kb-work" onClick={() => setLearning(true)}>{assigned ? 'Complete myself' : <><Check size={14} /> Complete</>}</button>}<span className={`kb-save-status state-${saveState}`} role="status">{stale ? 'Changed elsewhere' : saveState === 'error' ? 'Save failed' : dirty || saveState === 'saving' ? 'Saving…' : 'Saved'}</span>{saveState === 'error' && <button onClick={() => void save()}>Retry</button>}</footer>
   </div>
+}
+
+/** An agent's open question on a task, answered in place. The answer is
+ *  typed into the asking agent's terminal once that agent is idle. */
+function QuestionPanel({ repo, note, onError }: { repo: string; note: BoardNote; onError: (message: string) => void }) {
+  const question = note.question!
+  const [answer, setAnswer] = useState('')
+  const [sending, setSending] = useState(false)
+  const send = async (value: string) => {
+    if (!value.trim() || sending) return
+    setSending(true)
+    try {
+      const result = await bridge.invoke<{ delivery: 'sent' | 'queued' | 'none' }>('board:answer', { repo, id: note.id, answer: value.trim() })
+      if (result.delivery === 'queued') onError(`Answer saved. It will reach ${question.askedBy} when the agent is idle.`)
+      setAnswer('')
+    } catch (error) { onError((error as Error).message) } finally { setSending(false) }
+  }
+  return <section className="kb-question" aria-label="Question from an agent">
+    <div className="kb-question-head"><CircleHelp size={15} /><span><strong>{question.askedBy}</strong> asks · {ago(question.askedAt)}</span></div>
+    <p>{question.text}</p>
+    {!!question.options?.length && <div className="kb-question-options">{question.options.map(option => <button key={option} disabled={sending} onClick={() => void send(option)}>{option}</button>)}</div>}
+    <textarea rows={2} value={answer} disabled={sending} placeholder="Write an answer… (⌘↵ sends)" onChange={event => setAnswer(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); void send(answer) } }} />
+    <div className="kb-question-actions"><small>{question.terminalId ? 'Sent to the agent’s terminal when it is idle.' : 'Saved to the task’s progress log.'}</small><button className="kb-work" disabled={sending || !answer.trim()} onClick={() => void send(answer)}>Send answer</button></div>
+  </section>
+}
+
+/** A task's progress timeline, newest first. */
+function ProgressLog({ entries }: { entries: ProgressEntry[] }) {
+  const [all, setAll] = useState(false)
+  const shown = [...entries].reverse().slice(0, all ? entries.length : 8)
+  return <section className="kb-progress" aria-label="Progress">
+    <div><span className="kb-eyebrow">PROGRESS</span><span>{entries.length}</span></div>
+    <ol>{shown.map((entry, index) => <li key={`${entry.at}-${index}`}><time dateTime={entry.at}>{ago(entry.at)}</time><strong>{entry.actor}</strong><span>{entry.text}</span></li>)}</ol>
+    {entries.length > 8 && <button onClick={() => setAll(value => !value)}>{all ? 'Show recent' : `Show all ${entries.length}`}</button>}
+  </section>
+}
+
+/** A context fact whose evidence changed after it was verified: say why,
+ *  and offer to mark it verified or turn re-checking into a task. */
+function StalePanel({ note, freshness, apply, onFocus, onError }: { note: BoardNote; freshness: Freshness; apply: (command: BoardCommand) => Promise<unknown>; onFocus: (note: BoardNote) => void; onError: (message: string) => void }) {
+  const [busy, setBusy] = useState(false)
+  const run = async (work: () => Promise<void>) => { setBusy(true); try { await work() } catch (error) { onError((error as Error).message) } finally { setBusy(false) } }
+  const verify = () => run(async () => { await apply({ type: 'updateNote', id: note.id, expectedRevision: note.revision, patch: { verifiedAt: new Date().toISOString(), updatedBy: 'person' } }) })
+  const recheck = () => run(async () => {
+    const task = await apply({ type: 'createNote', note: { kind: 'task', title: `Re-verify: ${note.title}`.slice(0, 160), links: [{ to: note.id, kind: 'relates_to' }], acceptance: ['The fact matches the current code', 'Its evidence paths are current'],
+      body: `Check that codebase context ${note.id} still holds, then update it with board_upsert_context (id ${note.id}) or rewrite it.\n\nWhy it may be stale:\n${freshness.reasons.map(reason => `- ${reason}`).join('\n')}` } }) as BoardNote | null
+    if (task) onFocus(task)
+  })
+  return <section className="kb-stale" aria-label="This fact may be out of date">
+    <div className="kb-stale-head"><AlertTriangle size={15} /><strong>May be out of date</strong><span>verified {date(freshness.verifiedAt)}</span></div>
+    <ul>{freshness.reasons.map(reason => <li key={reason}>{reason}</li>)}</ul>
+    <div className="kb-stale-actions"><button disabled={busy} onClick={() => void verify()}>Still true · mark verified</button><button disabled={busy} className="kb-work" onClick={() => void recheck()}>Create re-verify task</button></div>
+  </section>
+}
+
+/** A task's subtasks, and the two ways to use them: ask an agent to split
+ *  the task, or fan the open subtasks out to parallel agents in worktrees. */
+function SubtaskPanel({ repo, note, notes, agents, onFocus, onError }: { repo: string; note: BoardNote; notes: BoardNote[]; agents: TerminalResource[]; onFocus: (note: BoardNote) => void; onError: (message: string) => void }) {
+  const children = notes.filter(item => item.parentId === note.id)
+  const open = children.filter(item => item.status === 'open' && !item.worktree)
+  const [providers, setProviders] = useState<Array<{ kind: string; label: string; executable: string | null }>>([])
+  const [kind, setKind] = useState('')
+  const [splitter, setSplitter] = useState('')
+  const [busy, setBusy] = useState(false)
+  useEffect(() => {
+    if (!bridge.desktop) return
+    bridge.invoke<Array<{ kind: string; label: string; executable: string | null }>>('terminalProviders').then(items => { const installed = items.filter(item => item.executable); setProviders(installed); setKind(current => current || installed[0]?.kind || '') }).catch(() => {})
+  }, [])
+  useEffect(() => { setSplitter(current => current || agents[0]?.id || '') }, [agents])
+  const split = async () => {
+    if (!splitter) return
+    setBusy(true)
+    try {
+      const delivery = await bridge.invoke<'sent' | 'queued'>('terminal:deliver', { id: splitter, text: `Split Agent Hub Task ${note.id} ("${note.title}") into 2 to 5 independent subtasks that different agents could do in parallel without touching the same files. Read the Task first. Create each with board_create_note (kind "task", parentId "${note.id}"), a clear title, a brief, and observable acceptance checks. Do not start implementing; reply with the list when done.` })
+      onError(delivery === 'queued' ? 'The agent will split this task when it is idle.' : 'Asked the agent to split this task.')
+    } catch (error) { onError((error as Error).message) } finally { setBusy(false) }
+  }
+  const fanOut = async () => {
+    setBusy(true)
+    try {
+      const result = await bridge.invoke<{ started: unknown[] }>('board:fanout', { repo, taskId: note.id, terminalKind: kind })
+      onError(`Started ${result.started.length} agents in their own worktrees.`)
+    } catch (error) { onError((error as Error).message) } finally { setBusy(false) }
+  }
+  return <section className="kb-subtasks" aria-label="Subtasks">
+    <div><span className="kb-eyebrow">SUBTASKS</span><span>{children.length}</span></div>
+    {children.map(child => <button key={child.id} className="kb-subtask" onClick={() => onFocus(child)}><i className={`kb-status status-${child.status}`} /><span>{child.title}</span>{child.worktree && <small><GitBranch size={10} /> {shortBranch(child.worktree.branch)}</small>}</button>)}
+    {open.length > 0 ? <div className="kb-subtask-actions">
+      <select aria-label="Agent for each subtask" value={kind} onChange={event => setKind(event.target.value)}>{providers.map(item => <option key={item.kind} value={item.kind}>{item.label}</option>)}{!providers.length && <option value="">No agent CLI found</option>}</select>
+      <button className="kb-work" disabled={busy || !kind} onClick={() => void fanOut()} title="One git worktree, branch, Session, and agent per open subtask"><GitBranch size={13} /> Fan out {open.length} subtask{open.length === 1 ? '' : 's'}</button>
+    </div> : children.length === 0 && <div className="kb-subtask-actions">
+      <select aria-label="Agent to split this task" value={splitter} onChange={event => setSplitter(event.target.value)}>{agents.map(agent => <option key={agent.id} value={agent.id}>{agent.name}</option>)}{!agents.length && <option value="">Start an agent first</option>}</select>
+      <button className="kb-work" disabled={busy || !splitter} onClick={() => void split()}>Split with agent</button>
+    </div>}
+  </section>
+}
+
+/** A fanned-out task's branch: progress since it started, and the ways to
+ *  finish it (merge command, remove the worktree). */
+function WorktreePanel({ repo, note, status, sessions, onOpenTerminal, onError }: { repo: string; note: BoardNote; status?: WorktreeStatus; sessions: RepoContext[]; onOpenTerminal: (terminalId: string) => void; onError: (message: string) => void }) {
+  const worktree = note.worktree!
+  const terminal = sessions.flatMap(session => session.terminals).find(item => item.cwd === worktree.path)
+  const [confirm, setConfirm] = useState(false)
+  const remove = async () => {
+    try { await bridge.invoke('board:worktree:remove', { repo, taskId: note.id, force: confirm }); setConfirm(false) }
+    catch (error) { if (/uncommitted/.test((error as Error).message)) setConfirm(true); onError((error as Error).message) }
+  }
+  const merge = `git merge --no-ff ${worktree.branch}`
+  return <section className="kb-worktree" aria-label="Worktree">
+    <div className="kb-worktree-head"><GitBranch size={14} /><strong>{worktree.branch}</strong>{status && (status.exists ? <span><b className="plus">+{status.insertions}</b> <b className="minus">−{status.deletions}</b> · {status.files} file{status.files === 1 ? '' : 's'} · {status.commits} commit{status.commits === 1 ? '' : 's'}{status.dirty ? ' · uncommitted' : ''}</span> : <span>worktree removed</span>)}</div>
+    <code title={worktree.path}>{worktree.path.replace(repo, '.')}</code>
+    <div className="kb-worktree-actions">
+      {terminal && <button onClick={() => onOpenTerminal(terminal.id)}>Show agent</button>}
+      <button onClick={() => void navigator.clipboard.writeText(merge).then(() => onError('Merge command copied.')).catch(() => onError(merge))} title={merge}>Copy merge command</button>
+      {status?.exists !== false && <button className={confirm ? 'danger' : ''} onClick={() => void remove()}>{confirm ? 'Remove anyway' : 'Remove worktree'}</button>}
+    </div>
+  </section>
 }

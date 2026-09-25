@@ -148,7 +148,7 @@ test('ticket ID collisions surface without overwriting either file', () => {
 })
 
 test('agent instructions preserve existing project guidance and avoid symlink targets', () => {
-  const root = repo(), outside = repo(), store = new BoardStore()
+  const root = repo(), outside = repo(), store = new BoardStore({ repoInstructions: true })
   try {
     writeFileSync(join(root, 'AGENTS.md'), '# Project rules\n\nKeep tests focused.\n')
     writeFileSync(join(root, 'AGENTS.override.md'), '# Local override\n')
