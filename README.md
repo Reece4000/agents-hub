@@ -2,6 +2,9 @@
 
 Desktop workspace for coding with agents. Tasks, notes, and codebase context share a repository canvas. Sessions hold agent and shell terminals.
 
+<img width="1544" height="1007" alt="image" src="https://github.com/user-attachments/assets/27efa17d-d555-48c7-a1ac-c7972e6380bc" />
+
+
 ## Run
 
 Requires Node.js 22+ for development.
